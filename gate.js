@@ -203,6 +203,21 @@ const REJECT_TOOL_NOTIFICATIONS = pinned('GATE_REJECT_TOOL_NOTIFICATIONS', POLIC
 // (ingress-appended) X-Forwarded-For entry is the client.
 const TRUSTED_INGRESS = pinned('GATE_TRUSTED_INGRESS', POLICY.trustedIngress, boolNorm) === true;
 
+// A path is accepted only if it is already in normal form: no percent-encoding,
+// no '.'/'..' segments, no empty segments, bounded length. Anything else is
+// refused before routing, so an open route cannot be reached by a look-alike.
+function normalisedPath(p) {
+  if (typeof p !== 'string' || p.length === 0 || p.length > 2048 || p[0] !== '/') return false;
+  if (/[%\\]/.test(p) || /[^\x21-\x7e]/.test(p)) return false;
+  const segs = p.split('/');
+  for (let i = 1; i < segs.length; i++) {
+    const sg = segs[i];
+    if (sg === '.' || sg === '..') return false;
+    if (sg === '' && i !== segs.length - 1) return false; // '//' inside the path
+  }
+  return true;
+}
+
 // Routes that carry no relay bearer by design. Exact matches only, plus the
 // discovery prefix. `/register` is never forwarded (DCR is off).
 const OPEN_EXACT = new Set(['/', '/authorize', '/token', '/attachment']);
@@ -780,6 +795,10 @@ async function handleMcp(ctx) {
 
 const server = http.createServer(async (req, res) => {
   const ctx = { req, res, id: crypto.randomUUID(), ip: clientIp(req), path: req.url.split('?')[0], start: Date.now(), user: null };
+  // Route matching happens on the path exactly as sent: any percent-encoding,
+  // dot segment or doubled slash that would change the path after normalisation
+  // is refused before any routing decision (no encoded look-alikes of open routes).
+  if (!normalisedPath(ctx.path)) return reject(ctx, 400, 'bad_path', 'bad_request', 'path must be normalised');
   const p = ctx.path;
 
   if (p === '/health') return health(ctx);

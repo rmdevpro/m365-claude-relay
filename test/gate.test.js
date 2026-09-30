@@ -188,6 +188,28 @@ test('exact open routes; /register never forwarded; look-alike paths need auth',
   assert.equal(wk.status, 200);
 });
 
+test('paths that are not in normal form are refused before routing (no encoded look-alikes of open routes)', async () => {
+  up.seen.length = 0;
+  // Sent on a raw socket: URL parsers (fetch, new URL) would collapse '.'/'..' and
+  // '//' before the request left the client, which is exactly what the gate must
+  // not rely on.
+  const raw = (target) => new Promise((resolve, reject) => {
+    const net = require('net');
+    const sock = net.connect(gate.port, '127.0.0.1', () => sock.write(`GET ${target} HTTP/1.1\r\nHost: relay.example\r\nConnection: close\r\n\r\n`));
+    let buf = '';
+    sock.on('data', (d) => { buf += d; }); sock.on('error', reject);
+    sock.on('close', () => { const m = /^HTTP\/1\.1 (\d+)/.exec(buf); resolve({ status: m ? Number(m[1]) : 0, text: buf }); });
+  });
+  for (const bad of ['/.well-known/%2F..%2Fmcp', '/.well-known/../mcp', '/.well-known/./x', '//token', '/%61uthorize', '/authorize%00', '/a//b', '/mcp\\x', '/' + 'a'.repeat(2100)]) {
+    const r = await raw(bad);
+    assert.equal(r.status, 400, bad);
+    assert.ok(r.text.includes('bad_request'), bad);
+  }
+  assert.equal(up.seen.length, 0, 'nothing reached upstream');
+  // A trailing slash is a plain path; '/.well-known/' is an open discovery prefix.
+  assert.equal((await raw('/.well-known/')).status, 200);
+});
+
 // ---- protocol shapes ---------------------------------------------------------
 test('JSON-RPC batches, non-objects and malformed bodies are refused', async () => {
   up.seen.length = 0;

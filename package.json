@@ -1,6 +1,6 @@
 {
   "name": "m365-claude-relay",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Microsoft 365 for Claude custom connectors: Softeria ms-365-mcp-server in On-Behalf-Of mode behind a minimal, reviewed gate. Each user acts as themselves; scopes are configuration.",
   "license": "MIT",
