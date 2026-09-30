@@ -60,9 +60,17 @@ test('real Softeria: tools/list = start-time scope-derived set minus excluded an
   const r = await call(gate.port, '/mcp', { headers: H(signer.mint()), body: RPC('tools/list', {}) });
   assert.equal(r.status, 200);
   const names = r.json.result.tools.map((t) => t.name);
-  for (const t of ['list-mail-messages', 'get-download-url', 'get-attachment-upload-link', 'get-current-user', 'list-mail-rules', 'create-my-calendar-permission', 'share-drive-item', 'list-excel-worksheets', 'list-subscriptions']) {
+  for (const t of ['list-mail-messages', 'get-download-url', 'get-attachment-upload-link', 'get-current-user', 'list-mail-rules', 'create-my-calendar-permission', 'share-drive-item', 'list-excel-worksheets']) {
     assert.ok(names.includes(t), `${t} must be exposed (covered by the policy scopes)`);
   }
+  // Nothing is withheld for a "no use case" reason: all six webhook-subscription
+  // tools (no scope required) are exposed and governed by Claude's permissions.
+  for (const t of ['list-subscriptions', 'create-subscription', 'get-subscription', 'update-subscription', 'delete-subscription', 'reauthorize-subscription']) {
+    assert.ok(names.includes(t), `${t} must be exposed (webhook tools are not excluded)`);
+    assert.ok(DERIVED.tools.includes(t), `${t} must be in the derived surface`);
+  }
+  // The only exclusions are tools the relay replaces with a better one.
+  assert.deepEqual([...POLICY.excludedTools].sort(), ['download-bytes', 'download-bytes-to-file']);
   for (const t of ['add-mail-attachment', 'create-mail-attachment-upload-session', 'graph-batch']) assert.ok(!names.includes(t), `${t} is hidden`);
   for (const t of POLICY.excludedTools) assert.ok(!names.includes(t), `${t} is excluded`);
   // Needs a scope the policy does not grant, or a work tenant: never present.

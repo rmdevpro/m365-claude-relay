@@ -47,7 +47,7 @@ surface costs a list of names per conversation, not schemas. A tool whose servic
 the account lacks simply fails (Graph 403/404) — nothing runs that the scope does not allow.
 
 Softeria 0.157.0 ships 337 tools (`tools/list` in `--org-mode` with no filter). What today's policy
-(default scopes, policy `2026-09-30.4`) exposes, and what more scopes would add, on a **personal**
+(default scopes, policy `2026-09-30.5`) exposes, and what more scopes would add, on a **personal**
 (outlook.com, `MS365_MCP_TENANT_ID=consumers`, no `--org-mode`) account — which is how this
 prototype currently runs:
 
@@ -71,7 +71,7 @@ Scopes **not** in today's policy and what adding them would expose (personal acc
 `SensitivityLabel.Read` (2).
 
 **Work tenants.** Set `MS365_MCP_TENANT_ID` to the tenant GUID and `MS365_MCP_ORG_MODE=true`; the
-derivation then runs in org mode (with the same seven scopes that yields 135 tools — `get-schedule`
+derivation then runs in org mode (with the same seven scopes that yields 140 tools — `get-schedule`
 is added). Admin-consented work scopes (`Sites.Read.All`/`Sites.Selected`, `ChannelMessage.Send`,
 `User.Read.All`, `Group.ReadWrite.All`, …) added to `MS365_MCP_ALLOWED_SCOPES` unlock the remaining
 ~170 tools: Teams, SharePoint, shared mailboxes, Planner, directory and people. Which scopes Blue Fox
@@ -116,11 +116,11 @@ The custom delta (`gate.js`) exists only for what Softeria cannot do today:
 - No CORS (upstream CORS headers are stripped); `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` on every response. HSTS belongs at the TLS ingress (no preload).
 - Generic 401 bodies; the reason category is in the log only.
 - Config is a security boundary and is validated at startup: `MS365_MCP_PUBLIC_URL` (https origin) and `MS365_MCP_CLIENT_ID` required; `GATE_JWKS_URI` and `MS365_MCP_ATTACHMENT_URL_BASE` must be https and in the approved origins (`GATE_APPROVED_ORIGINS`, default = public origin + `login.microsoftonline.com`); Graph upload-session URLs must be https on an approved Microsoft host suffix (`GATE_UPLOAD_HOST_SUFFIXES`); JWKS is fetched with one deadline over headers and body, size-capped, redirects refused.
-- **Scopes are the operator's configuration; the tool surface follows from them at every start** (`MS365_MCP_ALLOWED_SCOPES`, see "Scopes decide the tool surface"). The gate validates the list (Graph scope names; `Mail.ReadWrite` required by the upload bridge) and requires `MS365_MCP_EXTRA_SCOPES` (the consent shim) to be the same list — `start.sh` sets both, so users always consent to exactly the scopes the surface was derived from. **`policy.json` holds the image's fixed constraints**: the default scope list, the excluded webhook tools, the hidden bridge tools and the three safety switches. Both `start.sh` and `gate.js` read only the copy beside them (`GATE_POLICY_FILE` is refused); a malformed policy fails startup; `GATE_DRAFT_ONLY`, `GATE_REJECT_TOOL_NOTIFICATIONS` or `GATE_TRUSTED_INGRESS` set to anything other than the policy value aborts startup (they cannot be weakened from the environment).
+- **Scopes are the operator's configuration; the tool surface follows from them at every start** (`MS365_MCP_ALLOWED_SCOPES`, see "Scopes decide the tool surface"). The gate validates the list (Graph scope names; `Mail.ReadWrite` required by the upload bridge) and requires `MS365_MCP_EXTRA_SCOPES` (the consent shim) to be the same list — `start.sh` sets both, so users always consent to exactly the scopes the surface was derived from. **`policy.json` holds the image's fixed constraints**: the default scope list, the two byte-return tools excluded because `get-download-url` replaces them, the hidden bridge tools and the three safety switches. Both `start.sh` and `gate.js` read only the copy beside them (`GATE_POLICY_FILE` is refused); a malformed policy fails startup; `GATE_DRAFT_ONLY`, `GATE_REJECT_TOOL_NOTIFICATIONS` or `GATE_TRUSTED_INGRESS` set to anything other than the policy value aborts startup (they cannot be weakened from the environment).
 - Bounded operations: timeouts on JWKS fetches, loopback calls, Graph PUTs and client body reads; server header/request/keep-alive timeouts and a connection cap; upload memory bounded by the streaming chunk size, not the file size.
 - `/health` is green only when Softeria answers; both processes are supervised (`start.sh`).
 
-### Fixed constraints (committed `policy.json`, version `2026-09-30.4`)
+### Fixed constraints (committed `policy.json`, version `2026-09-30.5`)
 
 | Field | Value | Effect |
 |---|---|---|
@@ -194,7 +194,7 @@ Microsoft Graph **delegated** permissions matching the deployment's `MS365_MCP_A
 - `Dockerfile`: digest-pinned `node:22-slim`; `npm ci` from `package-lock.json`; `npm audit` fails the build on critical advisories; `sbom.cdx.json` is the CycloneDX SBOM; `NODE_OPTIONS` bounds the heap. Platform should run it read-only with no-new-privileges.
 - `.github/workflows/m365-relay-audit.yml`: weekly `npm audit` + tests.
 - Update Softeria: bump the version in `package.json`; `npm install --package-lock-only`; regenerate the SBOM; `npm test`; rebuild; rerun your acceptance tests. Change the scopes: set `MS365_MCP_ALLOWED_SCOPES` in the deployment and restart (no rebuild). Change the fixed constraints: edit `policy.json` (bump `version`), `npm test`, review, redeploy.
-- Tests: `npm ci && npm test` (41) — derivation boundary tier (fake loopback server: invalid/duplicate/excluded/regex-meta names, hold-open, stderr flood, oversized body → fail closed, bounded), composition tier (real `start.sh` + real `--obo` server with a runtime scope override, an argv recorder proving the derived escaped regex is what the OBO server is started with; failed derivation exposes nothing), unit tier against a mock upstream (config and policy-schema validation, policy drift, token matrix, protocol shapes, forged-XFF/rate limiting, JWKS stall and redirect, glue, consent shim, health, quotas, draft-only, streaming uploads, event attachments, logs) and an integration tier against the real pinned Softeria on loopback (start-time scope derivation → tool filtering, hidden tools, instructions, notifications, discovery, `/authorize`, `/register`, health with scope/tool count). OAuth/OBO/ticket flows need a real Entra app: run the acceptance checks against your tenant.
+- Tests: `npm ci && npm test` (42) — derivation boundary tier (fake loopback server: invalid/duplicate/excluded/regex-meta names, hold-open, stderr flood, oversized body → fail closed, bounded), composition tier (real `start.sh` + real `--obo` server with a runtime scope override, an argv recorder proving the derived escaped regex is what the OBO server is started with; failed derivation exposes nothing), unit tier against a mock upstream (config and policy-schema validation, policy drift, token matrix, protocol shapes, forged-XFF/rate limiting, JWKS stall and redirect, glue, consent shim, health, quotas, draft-only, streaming uploads, event attachments, logs) and an integration tier against the real pinned Softeria on loopback (start-time scope derivation → tool filtering, hidden tools, instructions, notifications, discovery, `/authorize`, `/register`, health with scope/tool count). OAuth/OBO/ticket flows need a real Entra app: run the acceptance checks against your tenant.
 
 ## Support and contributing
 

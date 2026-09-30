@@ -49,11 +49,20 @@ test('derive: a well-formed response yields a sorted unique list and an anchored
   assert.ok(!new RegExp(r.doc.enabledToolsRegex).test('list-users'));
 });
 
-test('derive: a returned fixed excluded tool fails the derivation (no output file)', () => {
-  const r = run([...GOOD, 'download-bytes']);
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /fixed excluded tool: download-bytes/);
-  assert.ok(!fs.existsSync(r.out));
+const POLICY = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'policy.json'), 'utf8'));
+
+test('policy: the only fixed exclusions are the two byte-return tools that get-download-url replaces', () => {
+  assert.deepEqual([...POLICY.excludedTools].sort(), ['download-bytes', 'download-bytes-to-file']);
+  assert.deepEqual([...POLICY.hiddenTools].sort(), ['add-mail-attachment', 'create-mail-attachment-upload-session', 'graph-batch']);
+});
+
+test('derive: every fixed excluded tool returned by the loopback fails the derivation (no output file)', () => {
+  for (const excluded of POLICY.excludedTools) {
+    const r = run([...GOOD, excluded]);
+    assert.equal(r.status, 1, excluded);
+    assert.match(r.stderr, new RegExp(`fixed excluded tool: ${excluded}`));
+    assert.ok(!fs.existsSync(r.out), excluded);
+  }
 });
 
 test('derive: regex-meta, malformed, non-string and duplicate names fail', () => {

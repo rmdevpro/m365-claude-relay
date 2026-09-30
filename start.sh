@@ -13,8 +13,8 @@
 #   MS365_MCP_ORG_MODE=true                          work tenant (Teams/SharePoint/… tools; needs work scopes)
 #   MS365_MCP_ATTACHMENT_URL_BASE/_KEY/_TTL_S        OTS attachment download links (KEY is SECRET)
 #   GATE_*                                           gate limits/switches (see gate.js)
-# Fixed in the image (policy.json): excluded tools (webhook subscriptions),
-# hidden bridge tools, safety switches.
+# Fixed in the image (policy.json): tools excluded because the relay replaces
+# them (download-bytes* → get-download-url), hidden bridge tools, safety switches.
 set -euo pipefail
 
 : "${MS365_MCP_LOG_DIR:=/dev/shm/ms365-logs}"
