@@ -1,0 +1,25 @@
+{
+  "version": "2026-09-30.5",
+  "description": "Fixed constraints baked into the M365 relay OBO image: the default Graph scope list (operators override it with MS365_MCP_ALLOWED_SCOPES; the tool surface is derived from the scopes at every start by Softeria's --allowed-scopes logic), the tools excluded because the relay provides a better replacement (download-bytes* \u2192 get-download-url), the attachment-bridge primitives hidden because get-attachment-upload-link replaces them, and the safety switches (not weakenable through the environment). Nothing is withheld for any other reason: what an organisation does not want is Blocked in Claude's per-tool permissions.",
+  "scopes": [
+    "User.Read",
+    "Mail.ReadWrite",
+    "Mail.Send",
+    "Calendars.ReadWrite",
+    "Contacts.ReadWrite",
+    "MailboxSettings.ReadWrite",
+    "Files.ReadWrite"
+  ],
+  "excludedTools": [
+    "download-bytes",
+    "download-bytes-to-file"
+  ],
+  "hiddenTools": [
+    "add-mail-attachment",
+    "create-mail-attachment-upload-session",
+    "graph-batch"
+  ],
+  "draftOnly": true,
+  "rejectToolNotifications": true,
+  "trustedIngress": false
+}
