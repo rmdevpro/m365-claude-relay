@@ -15,21 +15,21 @@ Open source, MIT, best-effort support via GitHub issues. Image: `ghcr.io/rmdevpr
 Claude's native Microsoft 365 connector cannot handle attachments: per Anthropic's docs,
 "attachments aren't supported in write tools, so sending, forwarding, and drafting all reject
 messages with attachments" and "Claude can't attach files to the drafts it creates". It is also
-fixed at roughly 70 tools chosen by Anthropic, refuses personal Microsoft accounts, and requires
-tenant-wide consent to Anthropic's app. Under the hood it runs the same open-source server this
-relay runs (Softeria's M365 MCP Server). This relay lets you run that server yourself, with your
-own app registration and your own scope list, and adds the hardening a public endpoint needs.
+a fixed set of tools chosen by Anthropic (its security guide lists about 45), refuses personal
+Microsoft accounts, and requires tenant-wide consent to Anthropic's app. This relay runs an
+open-source Microsoft 365 MCP server (Softeria's) yourself, with your own app registration and
+your own scope list, and adds the hardening a public endpoint needs.
 
 | | Claude's native Microsoft 365 connector | m365-claude-relay |
 |---|---|---|
 | Email attachments | Not supported: sending, forwarding and drafting with attachments are rejected; Claude can't attach files to drafts | Read any attachment as a real file; send, forward and draft with files up to 150 MB |
 | Calendar event attachments | Not supported | Supported (attendees receive the update) |
-| Tools | ~70 (30+ read, 40+ write), fixed by Anthropic | 337 in the catalog; your scope list decides what is exposed (139 with the default scopes) |
+| Tools | About 45, fixed by Anthropic | 337 in the catalog; your scope list decides what is exposed (139 with the default scopes) |
 | Areas | SharePoint/OneDrive search and file writes, Outlook mail and calendar, Teams chat and calendar | The same areas in depth, plus contacts, calendar sharing/delegation, mailbox rules, OneDrive file operations and Excel workbooks, To Do, OneNote, Planner, groups, rooms, presence, meeting transcripts/recordings, webhook subscriptions |
 | Accounts | Work or school only; personal accounts refused | Work tenants and personal accounts |
-| Consent | Tenant-wide consent to Anthropic's app (~40 scopes) by a Global Administrator | Your own app registration; users consent to exactly the scopes you list |
+| Consent | Tenant-wide consent to Anthropic's app by a Global Administrator | Your own app registration; users consent to exactly the scopes you list |
 | Where it runs | Anthropic-hosted | A container you run, behind your ingress |
-| Engine | Softeria M365 MCP Server, hosted by Anthropic | The same server, pinned and reviewed, behind a minimal public-endpoint gate |
+| Source | Closed; Anthropic-operated | Open source (MIT): Softeria's M365 MCP Server, pinned and reviewed, behind a minimal public-endpoint gate |
 
 Sources (September 2026): [Microsoft 365 connector](https://claude.com/docs/connectors/microsoft/365),
 [Set up the Microsoft 365 connector](https://support.claude.com/en/articles/12542951-set-up-the-microsoft-365-connector),
