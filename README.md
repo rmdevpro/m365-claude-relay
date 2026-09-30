@@ -48,8 +48,7 @@ the account lacks simply fails (Graph 403/404) — nothing runs that the scope d
 
 Softeria 0.157.0 ships 337 tools (`tools/list` in `--org-mode` with no filter). What today's policy
 (default scopes, policy `2026-09-30.5`) exposes, and what more scopes would add, on a **personal**
-(outlook.com, `MS365_MCP_TENANT_ID=consumers`, no `--org-mode`) account — which is how this
-prototype currently runs:
+(outlook.com, `MS365_MCP_TENANT_ID=consumers`, no `--org-mode`) account:
 
 | Scope in the policy | Exposes (tools) |
 |---|---|
@@ -74,9 +73,9 @@ Scopes **not** in today's policy and what adding them would expose (personal acc
 derivation then runs in org mode (with the same seven scopes that yields 140 tools — `get-schedule`
 is added). Admin-consented work scopes (`Sites.Read.All`/`Sites.Selected`, `ChannelMessage.Send`,
 `User.Read.All`, `Group.ReadWrite.All`, …) added to `MS365_MCP_ALLOWED_SCOPES` unlock the remaining
-~170 tools: Teams, SharePoint, shared mailboxes, Planner, directory and people. Which scopes Blue Fox
-gets is a Martech decision, made in their app registration and their container environment; the
-resulting surface should be exercised against the real tenant before go-live.
+~170 tools: Teams, SharePoint, shared mailboxes, Planner, directory and people. Which scopes a
+work tenant gets is that organisation's decision, made in its app registration and its container
+environment; exercise the resulting surface against the real tenant before go-live.
 
 **Scopes are runtime configuration — no rebuild to change them.** `MS365_MCP_ALLOWED_SCOPES` in the
 container environment is the scope list (default: `policy.json` `scopes`). At every start, `start.sh`
