@@ -222,9 +222,9 @@ Microsoft Graph **delegated** permissions matching the deployment's `MS365_MCP_A
 
 ## Support and contributing
 
-Best effort, no SLA: open a GitHub issue. Security reports: open an issue titled "security" with no
-exploit details, or email security@blueprintagentic.ai. Upstream fixes are preferred over relay
-code — three of the relay's pieces exist only until the corresponding Softeria PRs merge.
+Best effort, no SLA: open a GitHub issue. Security reports: open a GitHub issue titled "security"
+with no exploit details. Upstream fixes are preferred over relay code — three of the relay's pieces
+exist only until the corresponding Softeria PRs merge.
 
 ## License
 
