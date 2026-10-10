@@ -1,6 +1,6 @@
 ---
 name: m365-relay
-description: Use whenever working with the user's Microsoft 365 mail, calendar, contacts or OneDrive through the "M365 relay" connector — reading or searching email, reading email attachments (PDF, Excel, Word, images), sending or replying with attachments, drafts, calendar events and invites, contacts, OneDrive files. Covers the attachment download/upload link workflow, which is the only way to handle real files through this connector.
+description: Use whenever working with the user's Microsoft 365 mail, calendar, contacts or OneDrive through the "M365 relay" connector — reading, searching or triaging email, reading email attachments (PDF, Excel, Word, images), sending or replying with attachments, drafts, calendar events and invites, contacts, OneDrive files. Covers the attachment download/upload link workflow, which is the only way to handle real files through this connector.
 ---
 
 # Microsoft 365 via the M365 relay connector
@@ -9,7 +9,7 @@ The M365 relay connector gives you the signed-in user's own Outlook mail, calend
 
 To confirm which account you are acting as, call `get-current-user` (returns the signed-in user's name, address and id) rather than inferring it from message headers.
 
-The connector exposes every Microsoft 365 tool the user's consented scopes cover (mail, folders and rules, calendar including sharing and delegation, contacts, OneDrive including sharing, Excel workbooks on OneDrive), except the ones it replaces with better tools: raw byte downloads (use `get-download-url`) and the attachment-bridge primitives (use `get-attachment-upload-link`). Prefer the specific tool for the job; if a tool returns 403/404 because the account lacks the service or permission, tell the user it is not available to their account instead of retrying. Never use `download-bytes` for attachments or files — it returns base64 into the conversation and fails on anything but tiny files; use the link tools below.
+The connector exposes every Microsoft 365 tool the user's consented scopes cover (mail, folders and rules, calendar including sharing and delegation, contacts, OneDrive including sharing, Excel workbooks on OneDrive), except the ones it replaces with better tools: raw byte downloads (use `get-download-url`) and the base64 attachment primitives (use `get-upload-url`). It also adds `read-mail-text` for reading mail. Prefer the specific tool for the job; if a tool returns 403/404 because the account lacks the service or permission, tell the user it is not available to their account instead of retrying. Never use `download-bytes` for attachments or files — it returns base64 into the conversation and fails on anything but tiny files; use the link tools below.
 
 ## Files: always use the link tools
 
@@ -31,15 +31,15 @@ Repeat steps 3–4 for each attachment. Each link works **once** and expires wit
 2. Create a draft and take its `id`:
    - new message: `create-draft-email`
    - reply / reply-all / forward: `create-reply-draft`, `create-reply-all-draft` or `create-forward-draft`, then `update-mail-message` to set the body if needed.
-3. `get-attachment-upload-link` with `messageId: {draft id}`, `filename: {name the recipient sees}` and `contentType` (for example `application/pdf`). For a calendar event use `eventId` instead of `messageId` (saving an attachment on an event you organise sends an update to attendees).
-4. In the sandbox run the returned command with the real path:
-   `curl -fsS -T '/path/to/file.pdf' '{url}'`
+3. `get-upload-url` with `target: /me/messages/{draft id}/attachments`, `name: {name the recipient sees}` and `contentType` (for example `application/pdf`). It returns `uploadUrl` (single-use, short-lived). For a calendar event use `target: /me/events/{event id}/attachments` (saving an attachment on an event you organise sends an update to attendees).
+4. In the sandbox upload the file with the real path:
+   `curl -fsS -T '/path/to/file.pdf' '{uploadUrl}'`
    The response JSON must say `"ok": true` with the file name and size. Files up to 150 MB are supported, and the relay handles large files automatically.
 5. Repeat 3–4 for each file.
 6. Optionally `list-mail-attachments` on the draft to confirm.
 7. `send-draft-message` with the draft id.
 
-Do **not** put base64 file content into `send-mail`; attachments only go through `get-attachment-upload-link`. Attachments can only be added to unsent drafts (or events), never to received or sent mail.
+Do **not** put base64 file content into `send-mail`; attachments only go through `get-upload-url`. Attachments can only be added to unsent drafts (or events), never to received or sent mail (the relay answers `not_a_draft`).
 
 ### Forward an email with its attachments
 
@@ -48,7 +48,7 @@ A forward carries the original attachments automatically. Microsoft copies them 
 - **As is:** `forward-mail-message` with `messageId`, the recipients, and an optional `comment`.
 - **With changes:** `create-forward-draft` gives you a draft that already contains the original attachments. Then:
   - `update-mail-message` for the body or recipients
-  - `get-attachment-upload-link` to add more files
+  - `get-upload-url` to add more files
   - `delete-mail-attachment` (draft id + attachment id from `list-mail-attachments`) to drop files
   - `send-draft-message`
 
@@ -56,7 +56,7 @@ A forward carries the original attachments automatically. Microsoft copies them 
 
 ### Attachments on calendar events
 
-- **Add a file to an event:** `get-attachment-upload-link` with `eventId` (from `get-calendar-view` / `get-calendar-event`) instead of `messageId`, then `curl -T` as above. There is no draft step for events.
+- **Add a file to an event:** `get-upload-url` with `target: /me/events/{event id}/attachments` (the id from `get-calendar-view` / `get-calendar-event`), then `curl -T` as above. There is no draft step for events.
 - **If the user organises the event**, adding an attachment (like any edit) **sends an update to all attendees**. Say so and confirm before uploading. If the user is an invitee, the attachment lands only on their own copy and nobody is notified.
 - **See an event's attachments:** `get-calendar-event` with `expand=attachments($select=id,name,contentType,size)`.
 - **Read one:** `get-download-url` with `target: /me/events/{event-id}/attachments/{attachment-id}/$value`, then `curl` as for mail.
@@ -70,9 +70,10 @@ A forward carries the original attachments automatically. Microsoft copies them 
 
 ## Mail
 
+- **Read what messages say with `read-mail-text`**, not `get-mail-message`. It returns the full text of up to 20 messages with the HTML, quoted reply history, signatures, footers and tracking links removed (forwards keep the forwarded content). Give `messageIds` (from a listing), or `folderId` (`inbox`, …) with optional `top` (max 20) and `filter` or `search`. Text is complete unless you set `maxChars`. If it says the result is too large, narrow the query (fewer messages, a date or sender `filter`, specific ids) or set `maxChars`. Use `get-mail-message` only when you need the original formatting or the quoted thread.
 - Search: `list-mail-messages` with `$search` (KQL). Wrap the **whole** query in double quotes, e.g. `"from:alice@contoso.com subject:invoice"`. You cannot combine `$search` with `$filter`.
 - Filters: `$filter` such as `isRead eq false` or `receivedDateTime ge 2026-01-01T00:00:00Z`.
-- Keep lists small: use `$top` (10–25) and `$select=id,subject,from,receivedDateTime,bodyPreview,hasAttachments`. Fetch the full body with `get-mail-message` only for messages you actually need.
+- Keep lists small: use `$top` (10–25) and `$select=id,subject,from,receivedDateTime,bodyPreview,hasAttachments`; never select `body` in a listing. Then read the messages you need with `read-mail-text`.
 - Folders: well-known names (`inbox`, `sentitems`, `drafts`, `archive`, `deleteditems`) or ids from `list-mail-folders`.
 - Actions: `update-mail-message` (`isRead`, `flag`), `move-mail-message`, `delete-mail-message` (moves to Deleted Items).
 - Never invent recipient addresses. Take them from the mail, the contacts, or the user.

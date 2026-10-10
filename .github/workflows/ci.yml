@@ -16,7 +16,7 @@ jobs:
           node-version: '22'
       - run: npm ci --ignore-scripts
       - run: npm audit --omit=dev --audit-level=high
-      - run: bash -n start.sh && node --check gate.js && node --check derive-tools.js
+      - run: bash -n start.sh && node --check gate.js && node --check mail-text.js
       - run: npm test
       - name: image builds
         run: docker build -t m365-claude-relay:ci .

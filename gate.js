@@ -2,18 +2,20 @@
 // Gate for the M365 relay OBO deployment (m365-claude-relay). OTS-first.
 //
 // Softeria ms-365-mcp-server (loopback, `--http --obo`) owns OAuth/OBO, Graph,
-// the tool surface (`--enabled-tools`), Graph consent scopes
-// (`MS365_MCP_EXTRA_SCOPES`), attachment download links
-// (`--enable-attachment-urls`) and the per-call audit log. This gate is the
-// minimal custom delta, each piece justified in README.md:
+// the tool surface (`--allowed-scopes`), Graph consent scopes
+// (`MS365_MCP_EXTRA_SCOPES`), attachment download AND upload links
+// (`--enable-attachment-urls`: get-download-url, get-upload-url) and the
+// per-call audit log. This gate is the minimal custom delta, each piece
+// justified in README.md:
 //
 //   1. Inbound relay-token validation before OBO (signature vs Microsoft's
 //      keys, iss, aud, tid, lifetime, scope, optional user allowlist).
-//   2. Upload bridge `get-attachment-upload-link` until upstream PR #695 lands.
-//   3. Consent shim in /authorize until upstream PR #694 lands.
-//   4. MCP glue: advertise/dispatch the upload tool, hide the two OTS upload
-//      primitives it supersedes, replace server instructions that point at
-//      disabled tools, refuse JSON-RPC batches.
+//   2. /authorize: the caller's scope is replaced by the relay scope; Softeria
+//      adds the configured Graph scopes (the caller cannot widen consent).
+//   3. MCP glue: hide the OTS primitives that get-upload-url supersedes, refuse
+//      excluded tools, draft-only check on get-upload-url, replace server
+//      instructions, refuse JSON-RPC batches.
+//   4. read-mail-text (mail-text.js) until upstream Softeria#708 ships.
 //
 // Public-service posture (m365-claude-relay "Final hardening list", section A):
 // structured logs with a correlation id and fixed categories; canonical client
@@ -23,15 +25,14 @@
 // rate limiting, per-user upload quotas, draft-only enforcement and
 // tool-notification refusal as switchable mechanisms (section B, J decides).
 //
-// State held in memory only: Microsoft public keys; pending upload links
-// (draft id, filename, the caller's bearer until used or expired, <= 5 min);
-// one chunk of an upload while it streams to Graph. Nothing on disk.
+// State held in memory only: Microsoft public keys and rate-limit windows.
+// Nothing on disk. (Download/upload tickets live in Softeria, in memory.)
 
 const http = require('http');
-const https = require('https');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const mailText = require('./mail-text');
 
 // ---- configuration (validated; bad values fail startup) ---------------------
 
@@ -121,12 +122,16 @@ for (const [k, ok] of Object.entries(SCHEMA)) if (!ok(POLICY[k])) fatal(`policy.
 for (const k of Object.keys(POLICY)) if (!(k in SCHEMA)) fatal(`policy.json: unknown field "${k}"`);
 for (const s of POLICY.scopes) if (!/^[A-Za-z][\w.]*$/.test(s)) fatal(`policy.json scopes: "${s}" is not a Graph scope name`);
 for (const t of [...POLICY.excludedTools, ...POLICY.hiddenTools]) if (!/^[a-z][a-z0-9-]*$/.test(t)) fatal(`policy.json: "${t}" is not a tool name`);
-// The upload bridge relies on these being registered upstream but hidden.
+// Superseded by get-upload-url, so hidden; registered upstream because the gate
+// uses them over loopback (graph-batch for read-mail-text).
 for (const t of ['add-mail-attachment', 'create-mail-attachment-upload-session', 'graph-batch']) {
   if (!POLICY.hiddenTools.includes(t)) fatal(`policy.json hiddenTools must include "${t}"`);
 }
 for (const t of POLICY.hiddenTools) if (POLICY.excludedTools.includes(t)) fatal(`policy.json: "${t}" cannot be both hidden and excluded`);
-if (!POLICY.scopes.includes('Mail.ReadWrite')) fatal('policy.json scopes must include Mail.ReadWrite (the upload bridge attaches to drafts)');
+for (const t of ['get-upload-url', 'get-download-url', 'get-mail-message']) {
+  if (POLICY.excludedTools.includes(t) || POLICY.hiddenTools.includes(t)) fatal(`policy.json: "${t}" is required by the relay and cannot be excluded or hidden`);
+}
+if (!POLICY.scopes.includes('Mail.ReadWrite')) fatal('policy.json scopes must include Mail.ReadWrite (uploads attach to drafts; read-mail-text reads mail)');
 function pinned(envName, policyValue, norm) {
   const raw = process.env[envName];
   if (raw === undefined || raw === '') return policyValue;
@@ -135,14 +140,15 @@ function pinned(envName, policyValue, norm) {
 }
 const sortedList = (v) => list(Array.isArray(v) ? v.join(' ') : v).sort().join(' ');
 const boolNorm = (v) => String(v).trim().toLowerCase().replace(/^(1|yes|on)$/, 'true').replace(/^(0|no|off)$/, 'false');
-// Scopes are operator configuration: MS365_MCP_ALLOWED_SCOPES (start.sh
-// derives the tool surface from them at every start), defaulting to the
-// policy's list. MS365_MCP_EXTRA_SCOPES (the consent shim) must be the same
-// list; start.sh sets both.
+// Scopes are operator configuration: MS365_MCP_ALLOWED_SCOPES (Softeria's
+// --allowed-scopes derives the tool surface from them at every start),
+// defaulting to the policy's list. MS365_MCP_EXTRA_SCOPES (what users consent
+// to at sign-in) must be the same list; start.sh sets both.
 const ALLOWED_SCOPES = list(process.env.MS365_MCP_ALLOWED_SCOPES).length ? list(process.env.MS365_MCP_ALLOWED_SCOPES) : POLICY.scopes;
 for (const sc of ALLOWED_SCOPES) if (!/^[A-Za-z][\w.]*$/.test(sc)) fatal(`MS365_MCP_ALLOWED_SCOPES: "${sc}" is not a Graph scope name`);
-if (!ALLOWED_SCOPES.includes('Mail.ReadWrite')) fatal('MS365_MCP_ALLOWED_SCOPES must include Mail.ReadWrite (the upload bridge attaches to drafts)');
-const TOOL_COUNT = Number(process.env.RELAY_TOOL_COUNT) || null;
+if (!ALLOWED_SCOPES.includes('Mail.ReadWrite')) fatal('MS365_MCP_ALLOWED_SCOPES must include Mail.ReadWrite (uploads attach to drafts; read-mail-text reads mail)');
+pinned('MS365_MCP_EXTRA_SCOPES', ALLOWED_SCOPES, sortedList);
+let toolCount = null; // tools a client sees, from the latest tools/list
 
 // Approved origins: the only places the gate will fetch signing keys from, and
 // the only origins attachment download links may point at. Default: the public
@@ -161,21 +167,10 @@ if (process.env.MS365_MCP_ATTACHMENT_URL_BASE) {
   const u = parseOrigin('MS365_MCP_ATTACHMENT_URL_BASE', process.env.MS365_MCP_ATTACHMENT_URL_BASE, { httpsOnly: !INSECURE_TEST });
   if (!INSECURE_TEST && !APPROVED_ORIGINS.has(u.origin)) fatal(`MS365_MCP_ATTACHMENT_URL_BASE origin ${u.origin} is not in the approved origins`);
 }
-// Graph upload-session hosts the bridge may PUT to (suffix match on the hostname,
-// https only). Default covers the global cloud; set for other clouds.
-const UPLOAD_HOST_SUFFIXES = list(process.env.GATE_UPLOAD_HOST_SUFFIXES).length
-  ? list(process.env.GATE_UPLOAD_HOST_SUFFIXES)
-  : ['.office.com', '.office365.com', '.outlook.com', '.microsoft.com', '.sharepoint.com', '.windows.net'];
-
-// Graph consent scopes from the policy (start.sh exports the same list to
-// Softeria as MS365_MCP_EXTRA_SCOPES; a differing value fails startup).
-const CONSENT_SCOPES = list(pinned('MS365_MCP_EXTRA_SCOPES', ALLOWED_SCOPES, sortedList).join(' ')).map((s) => (s.includes('://') ? s : `https://graph.microsoft.com/${s}`));
-
 // Timeouts and connection bounds (mechanisms; values reviewed with the owner).
 const JWKS_TIMEOUT_MS = intEnv('GATE_JWKS_TIMEOUT_MS', 5000, 1000, 60000);
 const JWKS_MAX_AGE_MS = intEnv('GATE_JWKS_MAX_AGE_SECONDS', 86400, 300, 604800) * 1000;
 const UPSTREAM_TIMEOUT_MS = intEnv('GATE_UPSTREAM_TIMEOUT_MS', 60000, 1000, 600000);
-const GRAPH_PUT_TIMEOUT_MS = intEnv('GATE_GRAPH_PUT_TIMEOUT_MS', 120000, 1000, 600000);
 const BODY_IDLE_TIMEOUT_MS = intEnv('GATE_BODY_IDLE_TIMEOUT_MS', 60000, 1000, 600000);
 const HEADERS_TIMEOUT_MS = intEnv('GATE_HEADERS_TIMEOUT_MS', 30000, 1000, 120000);
 const REQUEST_TIMEOUT_MS = intEnv('GATE_REQUEST_TIMEOUT_MS', 900000, 10000, 3600000);
@@ -184,15 +179,9 @@ const MAX_CONNECTIONS = intEnv('GATE_MAX_CONNECTIONS', 256, 1, 65535);
 // Rate limiting (per client IP, fixed one-minute window). 0 = off.
 const RATE_LIMIT_PER_MIN = intEnv('GATE_RATE_LIMIT_PER_MIN', 0, 0, 100000);
 
-// Upload bridge limits. 0 = unlimited for the count/quota values.
-const LINK_TTL_MS = intEnv('GATE_LINK_TTL_SECONDS', 300, 30, 300) * 1000;
-const LINK_MAX_BYTES = (intEnv('GATE_LINK_MAX_MB', 150, 0, 150) || 150) * 1024 * 1024;
-const LINK_TOTAL_BYTES = intEnv('GATE_LINK_TOTAL_MB', 512, 0, 65536) * 1024 * 1024;
-const LINK_MAX_PENDING = intEnv('GATE_LINK_MAX_PENDING', 64, 0, 100000);
-const LINK_MAX_CONCURRENT = intEnv('GATE_LINK_MAX_CONCURRENT', 4, 0, 1024);
-const LINK_MAX_PENDING_PER_USER = intEnv('GATE_LINK_MAX_PENDING_PER_USER', 0, 0, 100000);
-const LINK_MAX_CONCURRENT_PER_USER = intEnv('GATE_LINK_MAX_CONCURRENT_PER_USER', 0, 0, 1024);
 const MCP_MAX_BODY = intEnv('GATE_MCP_MAX_BODY_MB', 4, 1, 64) * 1024 * 1024;
+// read-mail-text: largest result returned whole; larger is refused with advice.
+const READ_MAIL_TEXT_MAX_CHARS = intEnv('GATE_READ_MAIL_TEXT_MAX_CHARS', 80000, 1000, 1000000);
 
 // Behaviour switches decided by the owner (section B), pinned in the policy.
 const DRAFT_ONLY = pinned('GATE_DRAFT_ONLY', POLICY.draftOnly, boolNorm) === true;
@@ -219,14 +208,17 @@ function normalisedPath(p) {
 }
 
 // Routes that carry no relay bearer by design. Exact matches only, plus the
-// discovery prefix. `/register` is never forwarded (DCR is off).
-const OPEN_EXACT = new Set(['/', '/authorize', '/token', '/attachment']);
+// discovery prefix. `/register` is never forwarded (DCR is off). /attachment is
+// Softeria's single-use ticket route (download GET, upload PUT).
+const OPEN_EXACT = new Set(['/', '/authorize', '/token']);
 const OPEN_PREFIX = '/.well-known/';
-const FILES_PREFIX = '/files/';
+const ATTACHMENT_ROUTE = '/attachment';
 
-// OTS tools superseded by the upload bridge: hidden from tools/list and refused
-// on external tools/call (the bridge calls them over loopback itself).
+// OTS tools superseded by get-upload-url: hidden from tools/list and refused on
+// external tools/call (the gate calls graph-batch over loopback itself).
 const HIDDEN_TOOLS = new Set(POLICY.hiddenTools);
+// Excluded tools are not registered upstream (start.sh); refused here as well.
+const EXCLUDED_TOOLS = new Set(POLICY.excludedTools);
 
 // ---- logging (structured, metadata only) --------------------------------------
 
@@ -484,7 +476,7 @@ function health(ctx) {
   const r = http.request({ host: UPSTREAM_HOST, port: UPSTREAM_PORT, method: 'GET', path: '/', timeout: 2000 }, (up) => {
     let buf = '';
     up.on('data', (c) => { if (buf.length < 1024) buf += c; });
-    up.on('end', () => { if (up.statusCode === 200 && /running/i.test(buf)) send(ctx, 200, { ok: true, upstream: 'ready', scopes: ALLOWED_SCOPES, tools: TOOL_COUNT }); else fail('not ready'); });
+    up.on('end', () => { if (up.statusCode === 200 && /running/i.test(buf)) send(ctx, 200, { ok: true, upstream: 'ready', scopes: ALLOWED_SCOPES, tools: toolCount }); else fail('not ready'); });
   });
   r.on('timeout', () => { r.destroy(); fail('timeout'); });
   r.on('error', () => fail('unreachable'));
@@ -495,72 +487,25 @@ function health(ctx) {
 
 const RELAY_INSTRUCTIONS = [
   'Microsoft 365 relay: mail, calendar, contacts and OneDrive of the signed-in user, via Microsoft Graph. Every call runs as that user.',
-  'Mail: list-mail-messages supports $search (KQL; wrap the whole query in double quotes) or $filter (not both), $top, $select. Use $select and bodyPreview for lists; fetch full bodies with get-mail-message only when needed.',
+  'Mail: list-mail-messages supports $search (KQL; wrap the whole query in double quotes) or $filter (not both), $top, $select. Use $select (id, subject, from, receivedDateTime) for lists, never body.',
+  'READING MAIL: read-mail-text returns the full text of up to 20 messages (messageIds, or folderId with top/filter/search) without HTML, quoted history, signatures, footers or tracking links. Use it instead of get-mail-message to read or triage. Set maxChars only to shorten; if it reports the result is too large, narrow the query.',
   'READING ATTACHMENTS: list-mail-attachments gives ids and names. Then call get-download-url with target /me/messages/{message-id}/attachments/{attachment-id}/$value; it returns a single-use downloadUrl. In the code sandbox run curl -fsSL -o <name> "<downloadUrl>" and open the file like an uploaded file. Never ask for base64 file content.',
-  'SENDING ATTACHMENTS: create a draft (create-draft-email or create-reply-draft / create-reply-all-draft / create-forward-draft), call get-attachment-upload-link with the draft id (or eventId for a calendar event) and filename, run the returned curl -T with the sandbox file path, then send-draft-message. Never inline base64 file content.',
+  'SENDING ATTACHMENTS: create a draft (create-draft-email or create-reply-draft / create-reply-all-draft / create-forward-draft), call get-upload-url with target /me/messages/{draft-id}/attachments (or /me/events/{event-id}/attachments) and name, run curl -fsS -T <sandbox file path> "<uploadUrl>", then send-draft-message. Up to 150 MB per file. Never inline base64 file content.',
   'FORWARDING: forward-mail-message (or create-forward-draft) carries the original attachments automatically. Replies do NOT carry the original attachments; forward instead. To drop some attachments: create-forward-draft, then delete-mail-attachment on the draft, then send-draft-message.',
   'Links are single-use and expire within 5 minutes. A sandbox network/proxy error on a link means the relay host must be added under Settings > Capabilities > Code execution > Additional allowed domains; tell the user.',
   'Calendar: prefer get-calendar-view with startDateTime/endDateTime (ISO 8601); set timeZone explicitly on events you create.',
   'Confirm with the user before sending, deleting, cancelling, or declining anything, unless they already asked for exactly that action.',
 ].join('\n');
 
-// ---- upload bridge -----------------------------------------------------------
+// ---- tools the gate answers or checks ------------------------------------------
 
-const UPLOAD_TOOL = 'get-attachment-upload-link';
-const INLINE_MAX = 3 * 1024 * 1024 - 1; // Graph: < 3 MB inline, 3-150 MB upload session
-const CHUNK = 320 * 1024 * 12;          // 3.75 MiB, a multiple of 320 KiB as Graph requires
 const MESSAGE_ID = /^[A-Za-z0-9_=-]{20,1024}$/;
-const MIME = /^[\w.+-]+\/[\w.+-]+$/;
+const UPLOAD_TARGET_MESSAGE = /^\/me\/messages\/([^/?#]+)\/attachments\/?$/;
 
-const UPLOAD_TOOL_DEF = {
-  name: UPLOAD_TOOL,
-  title: 'Get attachment upload link',
-  description:
-    'Attach a REAL FILE from your code sandbox to a draft email or to a calendar event, up to ' + Math.floor(LINK_MAX_BYTES / 1048576) + ' MB. Use this for every attachment; ' +
-    'do not pass base64 contentBytes. Steps: (1) for mail, create the draft (create-draft-email, create-reply-draft, create-reply-all-draft or ' +
-    'create-forward-draft) and take its id; for a calendar event take the event id; (2) call this tool with messageId (draft) OR eventId, plus filename; (3) in the code sandbox run the ' +
-    'returned curl command, which uploads the file and attaches it (the response JSON confirms name and size); (4) repeat per file, then send ' +
-    'with send-draft-message. The link works once and expires in ' + Math.floor(LINK_TTL_MS / 60000) + ' minutes. If the upload fails with a network/proxy error, the user ' +
-    'must add the relay host to Settings > Capabilities > Code execution > Additional allowed domains.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      messageId: { type: 'string', description: 'Id of the DRAFT message to attach the file to (mail). Give messageId or eventId, not both.' },
-      eventId: { type: 'string', description: 'Id of the calendar event to attach the file to. Saving an attachment on an event you organise sends an update to attendees.' },
-      filename: { type: 'string', description: 'Attachment name as the recipient will see it, e.g. report.pdf' },
-      contentType: { type: 'string', description: 'MIME type, e.g. application/pdf (optional; default application/octet-stream)' },
-    },
-    required: ['filename'],
-    additionalProperties: false,
-  },
-  annotations: { title: 'Get attachment upload link', readOnlyHint: false, destructiveHint: false, openWorldHint: false },
-};
-
-const links = new Map(); // key -> { messageId, filename, contentType, authorization, user, expires }
-let activeUploads = 0;
-let inflightBytes = 0;
-const activePerUser = new Map();
-
-setInterval(() => {
-  const now = Date.now();
-  for (const [k, v] of links) if (v.expires < now) links.delete(k);
-}, 15_000).unref();
-
-function pendingForUser(user) {
-  let n = 0;
-  for (const v of links.values()) if (v.user === user) n++;
-  return n;
-}
 function rpcResult(ctx, id, payload, isError) {
   const text = typeof payload === 'string' ? payload : JSON.stringify(payload);
   send(ctx, 200, { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }], isError: !!isError } });
 }
-function safeName(name, contentType) {
-  let n = String(name || '').replace(/[\\/\r\n"\x00-\x1f]/g, '_').trim().slice(0, 200);
-  if (!n) n = `attachment${{ 'application/pdf': '.pdf', 'image/png': '.png', 'image/jpeg': '.jpg' }[contentType] || ''}`;
-  return n;
-}
-
 // Call a Softeria tool internally as the given user (bearer). Errors carry only
 // a category; upstream text never leaves this function.
 async function callUpstreamTool(authorization, name, args, ctx) {
@@ -586,162 +531,44 @@ async function isDraft(authorization, messageId, ctx) {
   return m && m.isDraft === true;
 }
 
-async function handleUploadTool(ctx, rpc) {
-  const args = (rpc.params && rpc.params.arguments) || {};
-  const messageId = String(args.messageId || '');
-  const eventId = String(args.eventId || '');
-  if ((messageId && eventId) || (!messageId && !eventId)) return rpcResult(ctx, rpc.id, { error: 'give_message_id_or_event_id' }, true);
-  if (messageId && !MESSAGE_ID.test(messageId)) return rpcResult(ctx, rpc.id, { error: 'invalid_message_id' }, true);
-  if (eventId && !MESSAGE_ID.test(eventId)) return rpcResult(ctx, rpc.id, { error: 'invalid_event_id' }, true);
-  const kind = eventId ? 'event' : 'message';
-  const contentType = args.contentType ? String(args.contentType) : 'application/octet-stream';
-  if (!MIME.test(contentType)) return rpcResult(ctx, rpc.id, { error: 'invalid_content_type' }, true);
-  const filename = safeName(args.filename, contentType);
-  const user = ctx.user;
-  if (LINK_MAX_PENDING && links.size >= LINK_MAX_PENDING) return rpcResult(ctx, rpc.id, { error: 'busy', retryAfterSeconds: 30 }, true);
-  if (LINK_MAX_PENDING_PER_USER && pendingForUser(user) >= LINK_MAX_PENDING_PER_USER) return rpcResult(ctx, rpc.id, { error: 'too_many_pending_links', max: LINK_MAX_PENDING_PER_USER }, true);
-  if (DRAFT_ONLY && kind === 'message') {
-    let draft;
-    try { draft = await isDraft(ctx.req.headers.authorization, messageId, ctx); } catch (e) { logReq(ctx, 200, e.cat || 'graph_error'); return rpcResult(ctx, rpc.id, { error: 'message_lookup_failed' }, true); }
-    if (!draft) return rpcResult(ctx, rpc.id, { error: 'not_a_draft', hint: 'Create a draft first (create-draft-email / create-*-draft) and pass its id.' }, true);
-  }
-  const key = crypto.randomBytes(24).toString('base64url');
-  links.set(key, { kind, messageId, eventId, filename, contentType, authorization: ctx.req.headers.authorization, user, expires: Date.now() + LINK_TTL_MS });
-  const url = `${PUBLIC_URL}${FILES_PREFIX}${key}`;
-  logReq(ctx, 200, 'upload_link_issued', { pending: links.size });
-  rpcResult(ctx, rpc.id, {
-    url, filename, expiresInSeconds: LINK_TTL_MS / 1000, singleUse: true, maxBytes: LINK_MAX_BYTES,
-    curl: `curl -fsS -T '<path-to-local-file>' '${url}'`,
-    note: 'Replace <path-to-local-file> with the sandbox path of the file. The response JSON confirms the attachment.',
-  });
-}
-
-function approvedUploadUrl(raw) {
-  let u;
-  try { u = new URL(raw); } catch { return null; }
-  if (u.protocol !== 'https:' && !(INSECURE_TEST && u.protocol === 'http:')) return null;
-  const host = u.hostname.toLowerCase();
-  return UPLOAD_HOST_SUFFIXES.some((s) => host.endsWith(s.toLowerCase())) ? u : null;
-}
-
-function putChunk(u, chunk, start, total) {
-  return new Promise((resolve, rej) => {
-    const mod = u.protocol === 'http:' ? http : https;
-    const r = mod.request({
-      method: 'PUT', hostname: u.hostname, port: u.port || undefined, path: u.pathname + u.search, timeout: GRAPH_PUT_TIMEOUT_MS,
-      headers: { 'content-type': 'application/octet-stream', 'content-length': chunk.length, 'content-range': `bytes ${start}-${start + chunk.length - 1}/${total}` },
-    }, (resp) => {
-      resp.resume();
-      resp.on('end', () => resolve(resp.statusCode));
-    });
-    r.on('timeout', () => r.destroy(new Error('timeout')));
-    r.on('error', rej);
-    r.end(chunk);
-  });
-}
-
-// Attach the request body to the draft: inline when small; otherwise stream it
-// to a Graph upload session one bounded chunk at a time.
-// Softeria has message-attachment tools but none for events; events go through
-// its generic graph-batch tool (hidden from clients) with a single sub-request.
-async function graphOne(auth, method, url, body, ctx) {
-  const r = await callUpstreamTool(auth, 'graph-batch', { body: { requests: [{ id: '1', method, url, headers: { 'Content-Type': 'application/json' }, body }] } }, ctx);
-  const resp = r && Array.isArray(r.responses) ? r.responses.find((x) => String(x.id) === '1') : null;
-  if (!resp || resp.status < 200 || resp.status >= 300) throw Object.assign(new Error('graph'), { cat: 'graph_error' });
-  return resp.body || {};
-}
-async function attachInline(entry, buf, ctx) {
-  const body = { '@odata.type': '#microsoft.graph.fileAttachment', name: entry.filename, contentType: entry.contentType, contentBytes: buf.toString('base64') };
-  if (entry.kind === 'event') return graphOne(entry.authorization, 'POST', `/me/events/${entry.eventId}/attachments`, body, ctx);
-  return callUpstreamTool(entry.authorization, 'add-mail-attachment', { messageId: entry.messageId, body }, ctx);
-}
-async function createSession(entry, declared, ctx) {
-  const body = { AttachmentItem: { attachmentType: 'file', name: entry.filename, size: declared, contentType: entry.contentType } };
-  if (entry.kind === 'event') return graphOne(entry.authorization, 'POST', `/me/events/${entry.eventId}/attachments/createUploadSession`, body, ctx);
-  return callUpstreamTool(entry.authorization, 'create-mail-attachment-upload-session', { messageId: entry.messageId, body }, ctx);
-}
-
-async function attachStream(ctx, entry, declared) {
-  if (declared <= INLINE_MAX) {
-    const buf = await readBody(ctx.req, declared);
-    if (buf.length !== declared) throw Object.assign(new Error('short'), { cat: 'upload_short_body' });
-    const r = await attachInline(entry, buf, ctx);
-    return { method: 'inline', attachmentId: r.id };
-  }
-  const session = await createSession(entry, declared, ctx);
-  const u = approvedUploadUrl(session && session.uploadUrl);
-  if (!u) throw Object.assign(new Error('bad upload url'), { cat: 'upload_url_rejected' });
-
-  let pending = [];
-  let pendingBytes = 0;
-  let offset = 0;
-  let last = 0;
-  let idle = null;
-  const armIdle = () => { if (idle) clearTimeout(idle); idle = setTimeout(() => ctx.req.destroy(new Error('idle')), BODY_IDLE_TIMEOUT_MS); };
-  armIdle();
-  try {
-    for await (const piece of ctx.req) {
-      armIdle();
-      pending.push(piece); pendingBytes += piece.length;
-      if (offset + pendingBytes > declared) throw Object.assign(new Error('long'), { cat: 'upload_long_body' });
-      while (pendingBytes >= CHUNK) {
-        const joined = Buffer.concat(pending);
-        const chunk = joined.subarray(0, CHUNK);
-        last = await putChunk(u, chunk, offset, declared);
-        if (![200, 201, 202].includes(last)) throw Object.assign(new Error('chunk'), { cat: 'graph_upload_chunk_failed' });
-        offset += chunk.length;
-        const rest = joined.subarray(CHUNK);
-        pending = rest.length ? [Buffer.from(rest)] : [];
-        pendingBytes = rest.length;
-      }
+// Graph access for read-mail-text, as the calling user, through Softeria's
+// graph-batch tool (OBO exchange stays in Softeria). A GET is a one-request batch.
+function graphAsUser(authorization, ctx) {
+  return async (method, p, body, headers) => {
+    if (method === 'POST' && p === '/$batch') {
+      return { status: 200, body: await callUpstreamTool(authorization, 'graph-batch', { body }, ctx) };
     }
-  } finally { if (idle) clearTimeout(idle); }
-  if (pendingBytes) {
-    last = await putChunk(u, Buffer.concat(pending), offset, declared);
-    if (![200, 201, 202].includes(last)) throw Object.assign(new Error('chunk'), { cat: 'graph_upload_chunk_failed' });
-    offset += pendingBytes;
-  }
-  if (offset !== declared) throw Object.assign(new Error('short'), { cat: 'upload_short_body' });
-  return { method: 'upload-session', finalStatus: last };
+    const r = await callUpstreamTool(authorization, 'graph-batch', { body: { requests: [{ id: '1', method, url: p, headers: headers || {} }] } }, ctx);
+    const one = r && Array.isArray(r.responses) ? r.responses.find((x) => String(x.id) === '1') : null;
+    if (!one) throw Object.assign(new Error('graph'), { cat: 'graph_error' });
+    return { status: one.status, body: one.body };
+  };
 }
 
-async function receiveUpload(ctx, key) {
-  const entry = links.get(key);
-  if (!entry || entry.expires < Date.now()) { links.delete(key); send(ctx, 404, { ok: false, error: 'link_not_found' }); return logReq(ctx, 404, 'upload_link_not_found'); }
-  links.delete(key); // claimed before any byte is read: one attempt per link
-  const declared = Number(ctx.req.headers['content-length']);
-  if (!Number.isInteger(declared) || declared < 0) { send(ctx, 411, { ok: false, error: 'length_required' }); return logReq(ctx, 411, 'upload_no_length'); }
-  if (declared === 0) { send(ctx, 400, { ok: false, error: 'empty_upload' }); return logReq(ctx, 400, 'upload_empty'); }
-  if (declared > LINK_MAX_BYTES) { send(ctx, 413, { ok: false, error: 'too_large', maxBytes: LINK_MAX_BYTES }); return logReq(ctx, 413, 'upload_too_large'); }
-  if (LINK_MAX_CONCURRENT && activeUploads >= LINK_MAX_CONCURRENT) { send(ctx, 503, { ok: false, error: 'busy', retryAfterSeconds: 15 }); return logReq(ctx, 503, 'upload_busy'); }
-  const perUser = activePerUser.get(entry.user) || 0;
-  if (LINK_MAX_CONCURRENT_PER_USER && perUser >= LINK_MAX_CONCURRENT_PER_USER) { send(ctx, 503, { ok: false, error: 'busy', retryAfterSeconds: 15 }); return logReq(ctx, 503, 'upload_busy_user'); }
-  const reserve = Math.min(declared, CHUNK * 2); // streaming: at most two chunks resident per upload
-  if (LINK_TOTAL_BYTES && inflightBytes + reserve > LINK_TOTAL_BYTES) { send(ctx, 503, { ok: false, error: 'busy', retryAfterSeconds: 30 }); return logReq(ctx, 503, 'upload_memory_budget'); }
-
-  activeUploads++; inflightBytes += reserve; activePerUser.set(entry.user, perUser + 1);
+async function handleReadMailText(ctx, rpc) {
   try {
-    if (DRAFT_ONLY && entry.kind === 'message') {
-      let draft = false;
-      try { draft = await isDraft(entry.authorization, entry.messageId, ctx); } catch (e) { send(ctx, 502, { ok: false, error: 'message_lookup_failed' }); return logReq(ctx, 502, e.cat || 'graph_error'); }
-      if (!draft) { send(ctx, 409, { ok: false, error: 'not_a_draft' }); return logReq(ctx, 409, 'upload_not_draft'); }
-    }
-    const r = await attachStream(ctx, entry, declared);
-    send(ctx, 200, { ok: true, name: entry.filename, size: declared, ...r });
-    logReq(ctx, 200, 'upload_attached', { bytes: declared, method: r.method });
+    const out = await mailText.readMailText(rpc.params.arguments, graphAsUser(ctx.req.headers.authorization, ctx), READ_MAIL_TEXT_MAX_CHARS);
+    logReq(ctx, 200, 'read_mail_text', { messages: out.length });
+    return rpcResult(ctx, rpc.id, out);
   } catch (e) {
-    const cat = e.cat || (e.code === 'TOO_LARGE' ? 'upload_too_large' : e.code === 'IDLE' || e.message === 'idle' ? 'upload_idle_timeout' : 'upload_failed');
-    const status = cat.startsWith('graph') || cat.startsWith('upstream') ? 502 : cat === 'upload_too_large' ? 413 : 400;
-    if (!ctx.res.headersSent) send(ctx, status, { ok: false, error: cat });
-    logReq(ctx, status, cat);
-  } finally {
-    activeUploads--; inflightBytes -= reserve;
-    const n = (activePerUser.get(entry.user) || 1) - 1;
-    if (n <= 0) activePerUser.delete(entry.user); else activePerUser.set(entry.user, n);
+    if (e instanceof mailText.ToolError) { logReq(ctx, 200, 'read_mail_text_refused'); return rpcResult(ctx, rpc.id, { error: e.message }, true); }
+    logReq(ctx, 200, e.cat || 'read_mail_text_failed');
+    return rpcResult(ctx, rpc.id, { error: 'read_failed', category: e.cat || 'internal' }, true);
   }
 }
 
-// ---- /mcp: single JSON-RPC object only; glue for the upload tool -----------
+// Draft-only: an upload link for mail is minted only for a draft message.
+async function checkUploadTarget(ctx, rpc) {
+  const target = String((rpc.params.arguments || {}).target || '');
+  const m = UPLOAD_TARGET_MESSAGE.exec(target);
+  if (!m) return null; // events, or a target Softeria itself refuses
+  if (!MESSAGE_ID.test(m[1])) return { error: 'invalid_message_id' };
+  let draft;
+  try { draft = await isDraft(ctx.req.headers.authorization, m[1], ctx); } catch (e) { logReq(ctx, 200, e.cat || 'graph_error'); return { error: 'message_lookup_failed' }; }
+  return draft ? null : { error: 'not_a_draft', hint: 'Create a draft first (create-draft-email / create-*-draft) and pass its attachments collection as target.' };
+}
+
+// ---- /mcp: single JSON-RPC object only; MCP glue ------------------------------
 
 async function handleMcp(ctx) {
   let body;
@@ -760,10 +587,15 @@ async function handleMcp(ctx) {
     return reject(ctx, 400, 'mcp_notification_refused', 'invalid_request', 'notifications may only use notifications/* methods');
   }
   if (rpc.method === 'tools/call' && rpc.params) {
-    if (rpc.params.name === UPLOAD_TOOL) return handleUploadTool(ctx, rpc);
-    if (HIDDEN_TOOLS.has(rpc.params.name)) {
+    const name = rpc.params.name;
+    if (name === mailText.TOOL_NAME) return handleReadMailText(ctx, rpc);
+    if (HIDDEN_TOOLS.has(name) || EXCLUDED_TOOLS.has(name)) {
       logReq(ctx, 200, 'tool_hidden_refused');
-      return rpcResult(ctx, rpc.id, { error: 'tool_not_available', hint: `Use ${UPLOAD_TOOL} to attach files.` }, true);
+      return rpcResult(ctx, rpc.id, { error: 'tool_not_available', hint: 'Use get-upload-url to attach files and get-download-url to read them.' }, true);
+    }
+    if (name === 'get-upload-url' && DRAFT_ONLY) {
+      const refused = await checkUploadTarget(ctx, rpc);
+      if (refused) { logReq(ctx, 200, 'upload_target_refused'); return rpcResult(ctx, rpc.id, refused, true); }
     }
   }
   if (rpc.method === 'tools/list' || rpc.method === 'initialize') {
@@ -779,8 +611,9 @@ async function handleMcp(ctx) {
         r.result.instructions = RELAY_INSTRUCTIONS;
         out = Buffer.from(JSON.stringify(r));
       } else if (r && r.result && Array.isArray(r.result.tools)) {
-        r.result.tools = r.result.tools.filter((t) => !HIDDEN_TOOLS.has(t.name));
-        r.result.tools.push(UPLOAD_TOOL_DEF);
+        r.result.tools = r.result.tools.filter((t) => !HIDDEN_TOOLS.has(t.name) && !EXCLUDED_TOOLS.has(t.name) && t.name !== mailText.TOOL_NAME);
+        r.result.tools.push(mailText.TOOL_DEF);
+        toolCount = r.result.tools.length;
         out = Buffer.from(JSON.stringify(r));
       }
     } catch { /* leave untouched */ }
@@ -804,15 +637,17 @@ const server = http.createServer(async (req, res) => {
   if (p === '/health') return health(ctx);
   if (p === '/register') return reject(ctx, 404, 'register_disabled', 'not_found', 'dynamic client registration is disabled');
 
-  if (p.startsWith(FILES_PREFIX)) {
+  if (p === ATTACHMENT_ROUTE) {
+    // Softeria's ticket route: the single-use ticket is the credential.
     if (rateLimited(ctx.ip)) return reject(ctx, 429, 'rate_limited', 'rate_limited', 'too many requests', { 'retry-after': '60' });
-    if (req.method !== 'PUT') return reject(ctx, 405, 'files_method', 'method_not_allowed', 'PUT only', { allow: 'PUT' });
-    return receiveUpload(ctx, p.slice(FILES_PREFIX.length));
+    if (req.method !== 'GET' && req.method !== 'PUT') return reject(ctx, 405, 'attachment_method', 'method_not_allowed', 'GET or PUT only', { allow: 'GET, PUT' });
+    return forward(ctx);
   }
   if (p === '/authorize') {
-    // Consent shim: the authorize scope is fixed by the relay, never taken from the caller.
+    // The caller's scope is replaced by the relay scope; Softeria adds the
+    // configured Graph scopes (MS365_MCP_EXTRA_SCOPES). Consent cannot be widened.
     const u = new URL(req.url, PUBLIC_URL);
-    u.searchParams.set('scope', [`${CLIENT_ID}/${REQUIRED_SCOPE}`, ...CONSENT_SCOPES].join(' '));
+    u.searchParams.set('scope', `${CLIENT_ID}/${REQUIRED_SCOPE}`);
     req.url = u.pathname + u.search;
   }
   if (OPEN_EXACT.has(p) || p.startsWith(OPEN_PREFIX)) return forward(ctx);
@@ -840,7 +675,6 @@ server.listen(PORT, HOST, () => {
   logEvent({
     level: 'info', cat: 'listening', host: HOST, port: PORT, upstream: `${UPSTREAM_HOST}:${UPSTREAM_PORT}`, public: PUBLIC_URL, policy: POLICY.version, trustedIngress: TRUSTED_INGRESS,
     aud: CLIENT_ID.slice(0, 8), tids: ALLOWED_TIDS.length, scope: REQUIRED_SCOPE, users: ALLOWED_USERS.length || 'any', apikey: !!GATE_KEY,
-    allowedScopes: ALLOWED_SCOPES, tools: TOOL_COUNT, rateLimitPerMin: RATE_LIMIT_PER_MIN, draftOnly: DRAFT_ONLY, rejectToolNotifications: REJECT_TOOL_NOTIFICATIONS,
-    upload: { ttlSeconds: LINK_TTL_MS / 1000, maxMB: LINK_MAX_BYTES / 1048576, totalMB: LINK_TOTAL_BYTES / 1048576, maxPending: LINK_MAX_PENDING, maxConcurrent: LINK_MAX_CONCURRENT, perUserPending: LINK_MAX_PENDING_PER_USER, perUserConcurrent: LINK_MAX_CONCURRENT_PER_USER },
+    allowedScopes: ALLOWED_SCOPES, rateLimitPerMin: RATE_LIMIT_PER_MIN, draftOnly: DRAFT_ONLY, rejectToolNotifications: REJECT_TOOL_NOTIFICATIONS, readMailTextMaxChars: READ_MAIL_TEXT_MAX_CHARS,
   });
 });

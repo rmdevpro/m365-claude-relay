@@ -1,35 +1,34 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { CLIENT_ID, POLICY, makeSigner, startJwks, startStallingJwks, startRedirectingJwks, startUpstream, startUploadSink, startGate, call } = require('./helpers');
+const { CLIENT_ID, POLICY, makeSigner, startJwks, startStallingJwks, startRedirectingJwks, startUpstream, startGate, call } = require('./helpers');
 
 const RPC = (method, params, id = 1) => JSON.stringify({ jsonrpc: '2.0', id, method, params });
 const H = (tok) => ({ authorization: `Bearer ${tok}`, 'content-type': 'application/json', accept: 'application/json' });
 const DRAFT = 'DRAFT-AAMkADAwATMwMAItYzhhMC1mMjIBLTAwAi0wMAoARgAAA';
 const SENT = 'SENT-AAMkADAwATMwMAItYzhhMC1mMjIBLTAwAi0wMAoARgAAA';
 
-let signer, jwks, up, sink, gate;
+let signer, jwks, up, gate;
 const baseEnv = () => ({ UPSTREAM_PORT: String(up.port), GATE_JWKS_URI: `http://127.0.0.1:${jwks.port}/` });
 const NEUTRAL = { draftOnly: false, rejectToolNotifications: false }; // tests that exercise the switches turn them on explicitly
 
 test.before(async () => {
   signer = makeSigner();
   jwks = await startJwks(signer.jwk);
-  sink = await startUploadSink();
-  up = await startUpstream({ uploadUrl: sink.url });
-  gate = await startGate({ ...baseEnv(), GATE_LINK_MAX_MB: '5', GATE_LINK_MAX_PENDING: '3', GATE_LINK_MAX_CONCURRENT: '1', GATE_UPLOAD_HOST_SUFFIXES: '127.0.0.1' }, { policy: NEUTRAL });
+  up = await startUpstream();
+  gate = await startGate(baseEnv(), { policy: NEUTRAL });
 });
-test.after(() => { gate.close(); up.close(); jwks.close(); sink.close(); });
+test.after(() => { gate.close(); up.close(); jwks.close(); });
 
 // ---- configuration validation ------------------------------------------------
 test('bad or unapproved config fails startup', async () => {
   for (const env of [
-    { GATE_LINK_TTL_SECONDS: 'not-a-number' }, { GATE_LINK_TTL_SECONDS: '9999' }, { GATE_RATE_LIMIT_PER_MIN: '-1' },
+    { GATE_READ_MAIL_TEXT_MAX_CHARS: 'not-a-number' }, { GATE_READ_MAIL_TEXT_MAX_CHARS: '10' }, { GATE_RATE_LIMIT_PER_MIN: '-1' },
     { MS365_MCP_PUBLIC_URL: 'http://relay.example', GATE_ALLOW_INSECURE_TEST: '0' }, { MS365_MCP_PUBLIC_URL: '' }, { MS365_MCP_CLIENT_ID: 'nope' },
     { MS365_MCP_TENANT_ID: 'contoso' }, { GATE_DRAFT_ONLY: 'maybe' },
     { GATE_ALLOW_INSECURE_TEST: '0', GATE_JWKS_URI: 'http://127.0.0.1:1/' },                       // http JWKS outside tests
     { GATE_ALLOW_INSECURE_TEST: '0', GATE_JWKS_URI: 'https://evil.example/keys' },                  // unapproved origin
     { GATE_ALLOW_INSECURE_TEST: '0', MS365_MCP_ATTACHMENT_URL_BASE: 'https://other.example' },      // unapproved attachment origin
-    { MS365_MCP_ALLOWED_SCOPES: 'Mail.Read' }, { MS365_MCP_ALLOWED_SCOPES: 'Mail.ReadWrite bad scope!' },  // scopes: bridge needs Mail.ReadWrite; bad name
+    { MS365_MCP_ALLOWED_SCOPES: 'Mail.Read' }, { MS365_MCP_ALLOWED_SCOPES: 'Mail.ReadWrite bad scope!' },  // scopes: drafts need Mail.ReadWrite; bad name
     { MS365_MCP_EXTRA_SCOPES: 'Files.ReadWrite.All' },                                            // consent list must equal the allowed list
     { GATE_DRAFT_ONLY: 'false' }, { GATE_TRUSTED_INGRESS: 'true' },                              // policy drift: switches
     { GATE_POLICY_FILE: '/nonexistent/policy.json' },                                           // no alternate policy mechanism
@@ -53,6 +52,7 @@ test('policy schema is strict: wrong types and shapes fail startup, never weaken
     { ...POLICY, scopes: 'Mail.Send' }, { ...POLICY, scopes: ['Files.ReadWrite', ''] }, { ...POLICY, scopes: ['User.Read', 'Mail.Send'] },
     { ...POLICY, excludedTools: 'x' }, { ...POLICY, excludedTools: ['graph-batch'] }, { ...POLICY, excludedTools: ['Bad Name'] },
     { ...POLICY, version: '' }, { ...POLICY, extra: 1 }, [POLICY], 'not json {',
+    { ...POLICY, excludedTools: ['get-upload-url'] }, { ...POLICY, hiddenTools: [...POLICY.hiddenTools, 'get-download-url'] }, { ...POLICY, excludedTools: ['get-mail-message'] },
   ];
   for (const rawPolicy of bad) {
     const r = await startGate({ UPSTREAM_PORT: '1' }, { expectExit: true, rawPolicy });
@@ -64,15 +64,13 @@ test('policy schema is strict: wrong types and shapes fail startup, never weaken
   g.close();
 });
 
-test('operator scopes: MS365_MCP_ALLOWED_SCOPES overrides the policy default and drives the consent shim', async () => {
-  const g = await startGate({ ...baseEnv(), MS365_MCP_ALLOWED_SCOPES: 'User.Read Mail.ReadWrite Mail.Send', MS365_MCP_EXTRA_SCOPES: 'Mail.Send Mail.ReadWrite User.Read', GATE_DRAFT_ONLY: 'true', RELAY_TOOL_COUNT: '40' });
-  const r = await call(g.port, '/authorize?response_type=code&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&state=s&scope=evil', { method: 'GET' });
-  assert.equal(r.status, 302);
-  const scope = new URL(r.headers.get('location')).searchParams.get('scope');
-  assert.equal(scope, `${CLIENT_ID}/access_as_user https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send`);
+test('operator scopes: MS365_MCP_ALLOWED_SCOPES overrides the policy default; /health counts tools once listed', async () => {
+  const g = await startGate({ ...baseEnv(), MS365_MCP_ALLOWED_SCOPES: 'User.Read Mail.ReadWrite Mail.Send', MS365_MCP_EXTRA_SCOPES: 'Mail.Send Mail.ReadWrite User.Read', GATE_DRAFT_ONLY: 'true' });
   const h = await call(g.port, '/health', { method: 'GET' });
   assert.deepEqual(h.json.scopes, ['User.Read', 'Mail.ReadWrite', 'Mail.Send']);
-  assert.equal(h.json.tools, 40);
+  assert.equal(h.json.tools, null, 'unknown until a client lists tools');
+  await call(g.port, '/mcp', { headers: H(signer.mint()), body: RPC('tools/list', {}) });
+  assert.equal((await call(g.port, '/health', { method: 'GET' })).json.tools, 3);
   g.close();
   const g2 = await startGate({ ...baseEnv() }, { policy: { excludedTools: [] } });
   g2.close();
@@ -245,13 +243,15 @@ test('oversized MCP body is refused before upstream', async () => {
 });
 
 // ---- MCP glue ------------------------------------------------------------------
-test('initialize replaces instructions; tools/list hides superseded tools and appends the upload tool', async () => {
+test('initialize replaces instructions; tools/list hides superseded and excluded tools and appends read-mail-text', async () => {
   const init = await call(gate.port, '/mcp', { headers: H(signer.mint()), body: RPC('initialize', {}) });
   assert.match(init.json.result.instructions, /^Microsoft 365 relay/);
+  assert.match(init.json.result.instructions, /get-upload-url/);
+  assert.match(init.json.result.instructions, /read-mail-text/);
   const list = await call(gate.port, '/mcp', { headers: H(signer.mint()), body: RPC('tools/list', {}) });
-  assert.deepEqual(list.json.result.tools.map((t) => t.name), ['list-mail-messages', 'get-attachment-upload-link']);
+  assert.deepEqual(list.json.result.tools.map((t) => t.name), ['list-mail-messages', 'get-upload-url', 'read-mail-text']);
   up.seen.length = 0;
-  for (const name of ['add-mail-attachment', 'create-mail-attachment-upload-session', 'graph-batch']) {
+  for (const name of ['add-mail-attachment', 'create-mail-attachment-upload-session', 'graph-batch', 'download-bytes', 'download-bytes-to-file']) {
     const r = await call(gate.port, '/mcp', { headers: H(signer.mint()), body: RPC('tools/call', { name, arguments: {} }) });
     assert.equal(r.json.result.isError, true, name);
     assert.equal(JSON.parse(r.json.result.content[0].text).error, 'tool_not_available');
@@ -259,12 +259,14 @@ test('initialize replaces instructions; tools/list hides superseded tools and ap
   assert.equal(up.seen.length, 0, 'hidden tools never reach upstream from outside');
 });
 
-// ---- consent shim --------------------------------------------------------------
-test('/authorize scope is fixed by the relay, caller scope ignored', async () => {
+// ---- /authorize -----------------------------------------------------------------
+test('/authorize: the caller scope is replaced by the relay scope before Softeria sees it', async () => {
+  up.seen.length = 0;
   const r = await call(gate.port, '/authorize?response_type=code&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&state=s&scope=Files.ReadWrite.All%20evil', { method: 'GET' });
   assert.equal(r.status, 302);
-  const scope = new URL(r.headers.get('location')).searchParams.get('scope');
-  assert.equal(scope, [`${CLIENT_ID}/access_as_user`, ...POLICY.scopes.map((x) => `https://graph.microsoft.com/${x}`)].join(' '));
+  const sent = new URL(up.seen[0].url, 'http://x').searchParams;
+  assert.equal(sent.get('scope'), `${CLIENT_ID}/access_as_user`);
+  assert.equal(sent.get('state'), 's');
 });
 
 // ---- health / rate limiting --------------------------------------------------
@@ -281,109 +283,76 @@ test('per-IP rate limit is off by default and enforced when set', async () => {
     const codes = [];
     for (let i = 0; i < 5; i++) codes.push((await call(g.port, '/mcp', { body: '{}' })).status);
     assert.deepEqual(codes, [401, 401, 401, 429, 429]);
-    assert.equal((await call(g.port, '/files/x', { method: 'PUT', body: 'x' })).status, 429);
+    assert.equal((await call(g.port, '/attachment?t=x', { method: 'PUT', body: 'x' })).status, 429);
   } finally { g.close(); }
 });
 
-// ---- upload bridge -------------------------------------------------------------
-async function issueLink(port, tok, over = {}) {
-  const r = await call(port, '/mcp', { headers: H(tok), body: RPC('tools/call', { name: 'get-attachment-upload-link', arguments: { messageId: DRAFT, filename: 'a.txt', contentType: 'text/plain', ...over } }) });
-  return JSON.parse(r.json.result.content[0].text);
-}
-
-test('upload link: inline attach, single use, invalid inputs, size cap, pending cap', async () => {
-  const tok = signer.mint();
-  const link = await issueLink(gate.port, tok);
-  assert.match(link.url, /^https:\/\/relay\.example\/files\/[A-Za-z0-9_-]{32}$/);
-  const p = new URL(link.url).pathname;
-  const okPut = await call(gate.port, p, { method: 'PUT', body: 'hello' });
-  assert.equal(okPut.status, 200);
-  assert.equal(okPut.json.method, 'inline');
-  assert.equal(okPut.headers.get('cache-control'), 'no-store');
-  const attach = up.seen.filter((s) => s.body.includes('add-mail-attachment')).pop();
-  assert.match(attach.body, /"contentBytes":"aGVsbG8="/);
-  assert.equal((await call(gate.port, p, { method: 'PUT', body: 'hello' })).status, 404);
-  assert.equal((await call(gate.port, p, { method: 'GET' })).status, 405);
-
-  const badId = await call(gate.port, '/mcp', { headers: H(tok), body: RPC('tools/call', { name: 'get-attachment-upload-link', arguments: { messageId: '../x', filename: 'a' } }) });
-  assert.equal(JSON.parse(badId.json.result.content[0].text).error, 'invalid_message_id');
-
-  const big = await issueLink(gate.port, tok);
-  assert.equal((await call(gate.port, new URL(big.url).pathname, { method: 'PUT', headers: { 'content-length': String(6 * 1024 * 1024) }, body: Buffer.alloc(6 * 1024 * 1024) })).status, 413);
-  const noLen = await issueLink(gate.port, tok);
-  const noLenStatus = await new Promise((resolve, rej) => {
-    const http = require('http');
-    const r = http.request({ host: '127.0.0.1', port: gate.port, method: 'PUT', path: new URL(noLen.url).pathname, headers: { 'transfer-encoding': 'chunked' } }, (res) => { res.resume(); resolve(res.statusCode); });
-    r.on('error', rej); r.write('x'); r.end();
-  });
-  assert.equal(noLenStatus, 411);
-
-  await issueLink(gate.port, tok); await issueLink(gate.port, tok); await issueLink(gate.port, tok);
-  assert.equal((await issueLink(gate.port, tok)).error, 'busy');
+// ---- attachment tickets (Softeria) --------------------------------------------
+test('/attachment is open (the ticket is the credential), GET/PUT only, forwarded as sent', async () => {
+  up.seen.length = 0;
+  assert.equal((await call(gate.port, '/attachment?t=abc', { method: 'GET' })).status, 200);
+  assert.equal((await call(gate.port, '/attachment?t=abc', { method: 'PUT', body: 'bytes' })).status, 200);
+  assert.deepEqual(up.seen.map((x) => [x.method, x.url, x.body]), [['GET', '/attachment?t=abc', ''], ['PUT', '/attachment?t=abc', 'bytes']]);
+  assert.equal(up.seen[0].headers.authorization, undefined);
+  assert.equal((await call(gate.port, '/attachment?t=abc', { method: 'POST', body: 'x' })).status, 405);
+  assert.equal((await call(gate.port, '/attachment/x', { method: 'GET' })).status, 401, 'exact route only');
 });
 
-test('large upload streams to the Graph session in bounded chunks', async () => {
-  const g = await startGate({ ...baseEnv(), GATE_UPLOAD_HOST_SUFFIXES: '127.0.0.1' }, { policy: NEUTRAL });
-  try {
-    sink.puts.length = 0;
-    const link = await issueLink(g.port, signer.mint(), { filename: 'big.bin', contentType: 'application/octet-stream' });
-    const size = 4 * 1024 * 1024;
-    const r = await call(g.port, new URL(link.url).pathname, { method: 'PUT', headers: { 'content-length': String(size) }, body: Buffer.alloc(size, 1) });
-    assert.equal(r.status, 200);
-    assert.equal(r.json.method, 'upload-session');
-    const CHUNK = 320 * 1024 * 12;
-    assert.deepEqual(sink.puts, [{ range: `bytes 0-${CHUNK - 1}/${size}`, length: CHUNK }, { range: `bytes ${CHUNK}-${size - 1}/${size}`, length: size - CHUNK }]);
-  } finally { g.close(); }
-});
+const upload = (target) => RPC('tools/call', { name: 'get-upload-url', arguments: { target, name: 'a.pdf' } });
 
-test('upload URL outside the approved hosts is refused', async () => {
-  const g = await startGate({ ...baseEnv(), GATE_UPLOAD_HOST_SUFFIXES: '.office.com' }, { policy: NEUTRAL });
-  try {
-    const link = await issueLink(g.port, signer.mint());
-    const r = await call(g.port, new URL(link.url).pathname, { method: 'PUT', headers: { 'content-length': String(4 * 1024 * 1024) }, body: Buffer.alloc(4 * 1024 * 1024) });
-    assert.equal(r.status, 400);
-    assert.equal(r.json.error, 'upload_url_rejected');
-  } finally { g.close(); }
-});
-
-test('per-user pending quota and draft-only enforcement', async () => {
-  const g = await startGate({ ...baseEnv(), GATE_LINK_MAX_PENDING_PER_USER: '1' }, { policy: { ...NEUTRAL, draftOnly: true } });
-  try {
-    const a = signer.mint({ oid: 'user-a' });
-    const b = signer.mint({ oid: 'user-b' });
-    const c = signer.mint({ oid: 'user-c' });
-    const first = await issueLink(g.port, a);
-    assert.ok(first.url);
-    assert.equal((await issueLink(g.port, a)).error, 'too_many_pending_links');
-    assert.ok((await issueLink(g.port, b)).url, 'quota is per user');
-    assert.equal((await issueLink(g.port, c, { messageId: SENT })).error, 'not_a_draft');
-  } finally { g.close(); }
-});
-
-test('event attachments go through graph-batch as the user; both ids refused', async () => {
-  const g = await startGate(baseEnv(), { policy: NEUTRAL }); // fresh gate: the shared one has pending links from the cap test
+test('draft-only: get-upload-url for mail is forwarded only for a draft; events pass to Softeria', async () => {
+  const g = await startGate(baseEnv(), { policy: { ...NEUTRAL, draftOnly: true } });
   try {
     const tok = signer.mint();
-    const EVT = 'EVT-AAMkADAwATMwMAItYzhhMC1mMjIBLTAwAi0wMAoARgAAA';
-    const both = await call(g.port, '/mcp', { headers: H(tok), body: RPC('tools/call', { name: 'get-attachment-upload-link', arguments: { messageId: DRAFT, eventId: EVT, filename: 'a.txt' } }) });
-    assert.equal(JSON.parse(both.json.result.content[0].text).error, 'give_message_id_or_event_id');
-    const r = await call(g.port, '/mcp', { headers: H(tok), body: RPC('tools/call', { name: 'get-attachment-upload-link', arguments: { eventId: EVT, filename: 'agenda.txt', contentType: 'text/plain' } }) });
-    const link = JSON.parse(r.json.result.content[0].text);
     up.seen.length = 0;
-    const put = await call(g.port, new URL(link.url).pathname, { method: 'PUT', body: 'agenda' });
-    assert.equal(put.status, 200);
-    assert.equal(put.json.attachmentId, 'att-e');
-    const batch = up.seen.find((x) => x.body.includes('graph-batch'));
-    const req = JSON.parse(batch.body).params.arguments.body.requests[0];
-    assert.equal(req.method, 'POST');
-    assert.equal(req.url, `/me/events/${EVT}/attachments`);
-    assert.equal(req.body.contentBytes, Buffer.from('agenda').toString('base64'));
+    const sent = await call(g.port, '/mcp', { headers: H(tok), body: upload(`/me/messages/${SENT}/attachments`) });
+    assert.equal(JSON.parse(sent.json.result.content[0].text).error, 'not_a_draft');
+    assert.ok(!up.seen.some((x) => x.body.includes('"get-upload-url"')), 'refused before Softeria');
+    const bad = await call(g.port, '/mcp', { headers: H(tok), body: upload('/me/messages/..%2Fx/attachments') });
+    assert.equal(JSON.parse(bad.json.result.content[0].text).error, 'invalid_message_id');
+    const ok = await call(g.port, '/mcp', { headers: H(tok), body: upload(`/me/messages/${DRAFT}/attachments`) });
+    assert.equal(JSON.parse(ok.json.result.content[0].text).called, 'get-upload-url');
+    const evt = await call(g.port, '/mcp', { headers: H(tok), body: upload('/me/events/EVT-AAMkADAwATMwMAItYzhhMC1mMjIBLTAwAi0wMAoARgAAA/attachments') });
+    assert.equal(JSON.parse(evt.json.result.content[0].text).called, 'get-upload-url');
+    const lookup = up.seen.find((x) => x.body.includes('"get-mail-message"'));
+    assert.equal(lookup.headers.authorization, `Bearer ${tok}`, 'the draft check runs as the caller');
   } finally { g.close(); }
+  // Switch off: forwarded without a lookup.
+  up.seen.length = 0;
+  const r = await call(gate.port, '/mcp', { headers: H(signer.mint()), body: upload(`/me/messages/${SENT}/attachments`) });
+  assert.equal(JSON.parse(r.json.result.content[0].text).called, 'get-upload-url');
+  assert.ok(!up.seen.some((x) => x.body.includes('"get-mail-message"')));
 });
 
-test('upload links expire', async () => {
-  const g = await startGate({ ...baseEnv(), GATE_LINK_TTL_SECONDS: '30' }, { policy: NEUTRAL });
-  try { assert.equal((await issueLink(g.port, signer.mint())).expiresInSeconds, 30); } finally { g.close(); }
+// ---- read-mail-text -------------------------------------------------------------
+test('read-mail-text: answered by the gate through graph-batch as the caller, cleaned', async () => {
+  const tok = signer.mint();
+  up.seen.length = 0;
+  const r = await call(gate.port, '/mcp', { headers: H(tok), body: RPC('tools/call', { name: 'read-mail-text', arguments: { messageIds: ['AAA', 'MISSING-1'] } }) });
+  assert.equal(r.json.result.isError, false);
+  const out = JSON.parse(r.json.result.content[0].text);
+  assert.equal(out[0].text, 'Body AAA');
+  assert.deepEqual(out[1], { id: 'MISSING-1', error: 'not found' });
+  assert.equal(up.seen.length, 1);
+  const sent = JSON.parse(up.seen[0].body);
+  assert.equal(sent.params.name, 'graph-batch');
+  assert.equal(sent.params.arguments.body.requests[0].headers.Prefer, 'outlook.body-content-type="text"');
+  assert.equal(up.seen[0].headers.authorization, `Bearer ${tok}`);
+  const f = JSON.parse((await call(gate.port, '/mcp', { headers: H(tok), body: RPC('tools/call', { name: 'read-mail-text', arguments: { folderId: 'inbox', top: 2 } }) })).json.result.content[0].text);
+  assert.deepEqual(f.map((m) => m.text), ['Body F1', 'Body F2']);
+  const bad = await call(gate.port, '/mcp', { headers: H(tok), body: RPC('tools/call', { name: 'read-mail-text', arguments: {} }) });
+  assert.equal(bad.json.result.isError, true);
+  assert.match(JSON.parse(bad.json.result.content[0].text).error, /messageIds or folderId/);
+});
+
+test('read-mail-text: a result over the limit is refused whole', async () => {
+  const g = await startGate({ ...baseEnv(), GATE_READ_MAIL_TEXT_MAX_CHARS: '1000' }, { policy: NEUTRAL });
+  try {
+    const ids = Array.from({ length: 20 }, (_, i) => `ID-${i}-` + 'x'.repeat(40));
+    const r = await call(g.port, '/mcp', { headers: H(signer.mint()), body: RPC('tools/call', { name: 'read-mail-text', arguments: { messageIds: ids } }) });
+    assert.equal(r.json.result.isError, true);
+    assert.match(JSON.parse(r.json.result.content[0].text).error, /^Response would be [\d,]+ characters \(limit 1,000\)/);
+  } finally { g.close(); }
 });
 
 test('logs are structured and carry no upstream text', async () => {

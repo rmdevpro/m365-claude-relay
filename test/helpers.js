@@ -1,5 +1,5 @@
-// Test helpers: a local JWKS + token minter, a mock Softeria upstream, a mock
-// Graph upload-session receiver, and a gate launcher. Loopback only; no real
+// Test helpers: a local JWKS + token minter, a mock Softeria upstream and a
+// gate launcher. Loopback only; no real
 // credentials. GATE_ALLOW_INSECURE_TEST=1 lets the gate accept http loopback
 // origins; deployments never set it.
 const http = require('http');
@@ -35,18 +35,6 @@ async function startJwks(jwk) {
   return { port, close: () => s.close() };
 }
 
-// Mock Graph upload-session receiver: records each chunk's Content-Range.
-async function startUploadSink() {
-  const puts = [];
-  const s = http.createServer((req, res) => {
-    let n = 0;
-    req.on('data', (c) => { n += c.length; });
-    req.on('end', () => { puts.push({ range: req.headers['content-range'], length: n }); res.writeHead(202); res.end(); });
-  });
-  const port = await listen(s);
-  return { port, puts, url: `http://127.0.0.1:${port}/session`, close: () => s.close() };
-}
-
 // Mock upstream: records every request; answers MCP methods; serves "/".
 async function startUpstream(opts = {}) {
   const seen = [];
@@ -65,18 +53,21 @@ async function startUpstream(opts = {}) {
         const out = msgs.map((m) => {
           if (!m || !m.method) return { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'bad' } };
           if (m.method === 'initialize') return { jsonrpc: '2.0', id: m.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'mock', version: '0' }, instructions: 'UPSTREAM DEFAULT' } };
-          if (m.method === 'tools/list') return { jsonrpc: '2.0', id: m.id, result: { tools: [{ name: 'list-mail-messages', inputSchema: { type: 'object' } }, { name: 'add-mail-attachment', inputSchema: { type: 'object' } }, { name: 'create-mail-attachment-upload-session', inputSchema: { type: 'object' } }, { name: 'graph-batch', inputSchema: { type: 'object' } }] } };
+          if (m.method === 'tools/list') return { jsonrpc: '2.0', id: m.id, result: { tools: ['list-mail-messages', 'add-mail-attachment', 'create-mail-attachment-upload-session', 'graph-batch', 'download-bytes', 'get-upload-url'].map((name) => ({ name, inputSchema: { type: 'object' } })) } };
           if (m.method === 'tools/call') {
             const name = m.params && m.params.name;
             const args = (m.params && m.params.arguments) || {};
             const text = (o) => ({ jsonrpc: '2.0', id: m.id, result: { content: [{ type: 'text', text: JSON.stringify(o) }] } });
-            if (name === 'add-mail-attachment') return text({ id: 'att-1' });
-            if (name === 'create-mail-attachment-upload-session') return text({ uploadUrl: opts.uploadUrl || 'https://outlook.office.com/api/session' });
             if (name === 'get-mail-message') return text({ id: args.messageId, isDraft: String(args.messageId).startsWith('DRAFT') });
             if (name === 'graph-batch') {
-              const rq = args.body.requests[0];
-              const body = rq.url.endsWith('/createUploadSession') ? { uploadUrl: opts.uploadUrl || 'https://outlook.office.com/api/session' } : { id: 'att-e' };
-              return text({ responses: [{ id: rq.id, status: 201, body }] });
+              // Messages: /me/messages/{id} -> a text body; unknown ids 404. Folders: a list.
+              const msg = (id) => ({ id, subject: `S-${id}`, body: { contentType: 'text', content: `Body ${id}\n\nOn Mon, P wrote:\n> old` }, from: { emailAddress: { address: 'p@example.com' } } });
+              return text({ responses: args.body.requests.map((rq) => {
+                const mm = /^\/me\/messages\/([^?]+)\?/.exec(rq.url);
+                if (mm) return decodeURIComponent(mm[1]).startsWith('MISSING') ? { id: rq.id, status: 404, body: { error: { code: 'ErrorItemNotFound' } } } : { id: rq.id, status: 200, body: msg(decodeURIComponent(mm[1])) };
+                if (rq.url.startsWith('/me/mailFolders/')) return { id: rq.id, status: 200, body: { value: [msg('F1'), msg('F2')] } };
+                return { id: rq.id, status: 400, body: { error: { code: 'BadRequest' } } };
+              }) });
             }
             return text({ called: name });
           }
@@ -120,6 +111,7 @@ async function startGate(env, { expectExit, policy, rawPolicy } = {}) {
   if (policy || rawPolicy) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-copy-'));
     fs.copyFileSync(gatePath, path.join(dir, 'gate.js'));
+    fs.copyFileSync(path.join(__dirname, '..', 'mail-text.js'), path.join(dir, 'mail-text.js'));
     fs.writeFileSync(path.join(dir, 'policy.json'), typeof rawPolicy === 'string' ? rawPolicy : JSON.stringify(rawPolicy || { ...POLICY, ...policy }));
     gatePath = path.join(dir, 'gate.js');
   }
@@ -150,4 +142,4 @@ async function call(port, path, { method = 'POST', headers = {}, body } = {}) {
   return { status: res.status, headers: res.headers, text, json };
 }
 
-module.exports = { CLIENT_ID, CONSUMERS_TID, POLICY, makeSigner, startJwks, startStallingJwks, startRedirectingJwks, startUpstream, startUploadSink, startGate, call };
+module.exports = { CLIENT_ID, CONSUMERS_TID, POLICY, makeSigner, startJwks, startStallingJwks, startRedirectingJwks, startUpstream, startGate, call };
