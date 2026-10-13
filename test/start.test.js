@@ -7,6 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { spawn, spawnSync } = require('child_process');
+const { freePort } = require('./helpers');
 
 const OBO_ENV = (port, up) => ({
   PATH: process.env.PATH, HOME: '/tmp', PORT: String(port), HOST: '127.0.0.1', UPSTREAM_PORT: String(up),
@@ -37,7 +38,7 @@ for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => c.kill(sig));
 }
 
 test('composition: start.sh starts Softeria --obo with the scopes in the environment and only the exclusions as --enabled-tools', async () => {
-  const port = 40000 + Math.floor(Math.random() * 10000); const up = port + 1;
+  const port = await freePort(); const up = await freePort();
   const { app, log } = appCopyWithRecorder();
   const env = { ...OBO_ENV(port, up), MS365_MCP_ALLOWED_SCOPES: 'User.Read Mail.ReadWrite Mail.Send' };
   const child = spawn('bash', [path.join(app, 'start.sh')], { cwd: app, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });

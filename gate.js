@@ -8,8 +8,11 @@
 // per-call audit log. This gate is the minimal custom delta, each piece
 // justified in README.md:
 //
-//   1. Inbound relay-token validation before OBO (signature vs Microsoft's
-//      keys, iss, aud, tid, lifetime, scope, optional user allowlist).
+//   1. Inbound relay-token pre-check before OBO: the claims only (lifetime,
+//      version, aud, tid, iss, scope, optional user allowlist), so a token
+//      meant for something else gets a clean 401. The signature is verified by
+//      Microsoft itself when Softeria exchanges the token On-Behalf-Of the user:
+//      a forged token gets no Graph token and no data.
 //   2. /authorize: the caller's scope is replaced by the relay scope; Softeria
 //      adds the configured Graph scopes (the caller cannot widen consent).
 //   3. MCP glue: hide the OTS primitives that get-upload-url supersedes, refuse
@@ -21,11 +24,11 @@
 // structured logs with a correlation id and fixed categories; canonical client
 // address to the upstream; exact open routes; no CORS; security headers on
 // every response; generic 401s; config validated as a security boundary
-// (approved HTTPS origins); bounded outbound calls and JWKS cache age; per-IP
+// (approved HTTPS origins); bounded outbound calls; per-IP
 // rate limiting, per-user upload quotas, draft-only enforcement and
 // tool-notification refusal as switchable mechanisms (section B, J decides).
 //
-// State held in memory only: Microsoft public keys and rate-limit windows.
+// State held in memory only: rate-limit windows.
 // Nothing on disk. (Download/upload tickets live in Softeria, in memory.)
 
 const http = require('http');
@@ -69,7 +72,7 @@ function parseOrigin(name, raw, { httpsOnly }) {
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CONSUMERS_TID = '9188040d-6c67-4c5b-b112-36a304b66dad'; // Microsoft personal-account tenant
 
-// Test override: allows http origins (loopback JWKS/upstream) in the test suite
+// Test override: allows http origins (loopback upstream) in the test suite
 // only. Never set in a deployment; startup logs a warning when it is on.
 const INSECURE_TEST = boolEnv('GATE_ALLOW_INSECURE_TEST', false);
 
@@ -150,26 +153,21 @@ if (!ALLOWED_SCOPES.includes('Mail.ReadWrite')) fatal('MS365_MCP_ALLOWED_SCOPES 
 pinned('MS365_MCP_EXTRA_SCOPES', ALLOWED_SCOPES, sortedList);
 let toolCount = null; // tools a client sees, from the latest tools/list
 
-// Approved origins: the only places the gate will fetch signing keys from, and
-// the only origins attachment download links may point at. Default: the public
-// origin and Microsoft's login authority.
+// Approved origins: the only origins attachment download/upload links may point
+// at. Default: the public origin and Microsoft's login authority.
 const APPROVED_ORIGINS = new Set([
   PUBLIC_URL,
   'https://login.microsoftonline.com',
   ...list(process.env.GATE_APPROVED_ORIGINS).map((o) => parseOrigin('GATE_APPROVED_ORIGINS', o, { httpsOnly: !INSECURE_TEST }).origin),
 ]);
-const JWKS_URI = (process.env.GATE_JWKS_URI || '').trim() || 'https://login.microsoftonline.com/common/discovery/v2.0/keys';
-{
-  const u = parseOrigin('GATE_JWKS_URI', JWKS_URI, { httpsOnly: !INSECURE_TEST });
-  if (!INSECURE_TEST && !APPROVED_ORIGINS.has(u.origin)) fatal(`GATE_JWKS_URI origin ${u.origin} is not in the approved origins`);
+for (const retired of ['GATE_JWKS_URI', 'GATE_JWKS_TIMEOUT_MS', 'GATE_JWKS_MAX_AGE_SECONDS']) {
+  if (process.env[retired] !== undefined) fatal(`${retired} is no longer used (the token signature is verified by Microsoft at the OBO exchange); remove it`);
 }
 if (process.env.MS365_MCP_ATTACHMENT_URL_BASE) {
   const u = parseOrigin('MS365_MCP_ATTACHMENT_URL_BASE', process.env.MS365_MCP_ATTACHMENT_URL_BASE, { httpsOnly: !INSECURE_TEST });
   if (!INSECURE_TEST && !APPROVED_ORIGINS.has(u.origin)) fatal(`MS365_MCP_ATTACHMENT_URL_BASE origin ${u.origin} is not in the approved origins`);
 }
 // Timeouts and connection bounds (mechanisms; values reviewed with the owner).
-const JWKS_TIMEOUT_MS = intEnv('GATE_JWKS_TIMEOUT_MS', 5000, 1000, 60000);
-const JWKS_MAX_AGE_MS = intEnv('GATE_JWKS_MAX_AGE_SECONDS', 86400, 300, 604800) * 1000;
 const UPSTREAM_TIMEOUT_MS = intEnv('GATE_UPSTREAM_TIMEOUT_MS', 60000, 1000, 600000);
 const BODY_IDLE_TIMEOUT_MS = intEnv('GATE_BODY_IDLE_TIMEOUT_MS', 60000, 1000, 600000);
 const HEADERS_TIMEOUT_MS = intEnv('GATE_HEADERS_TIMEOUT_MS', 30000, 1000, 120000);
@@ -285,79 +283,26 @@ setInterval(() => {
   for (const [ip, w] of rateWindows) if (now - w.windowStart >= 120_000) rateWindows.delete(ip);
 }, 60_000).unref();
 
-// ---- signing keys (in-memory; bounded age; refreshed on unknown kid) ----------
-
-let keys = new Map();
-let keysFetchedAt = 0;
-let keysInFlight = null;
-let lastKeyMiss = 0;
-
-// One deadline covers headers AND the whole body; redirects are refused so the
-// approved-origin check on JWKS_URI cannot be escaped; the body is size-capped.
-const JWKS_MAX_BYTES = 1_000_000;
-async function fetchBounded(url, ms, maxBytes) {
-  const ac = new AbortController();
-  const t = setTimeout(() => ac.abort(), ms);
-  try {
-    const resp = await fetch(url, { signal: ac.signal, redirect: 'manual' });
-    if (resp.status >= 300 && resp.status < 400) throw new Error('redirect refused');
-    if (!resp.ok) throw new Error(`status ${resp.status}`);
-    const reader = resp.body.getReader();
-    const chunks = [];
-    let size = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.length;
-      if (size > maxBytes) { await reader.cancel(); throw new Error('too large'); }
-      chunks.push(Buffer.from(value));
-    }
-    return Buffer.concat(chunks).toString('utf8');
-  } finally { clearTimeout(t); }
-}
-async function refreshKeys() {
-  if (keysInFlight) return keysInFlight;
-  keysInFlight = (async () => {
-    const text = await fetchBounded(JWKS_URI, JWKS_TIMEOUT_MS, JWKS_MAX_BYTES);
-    const { keys: jwks } = JSON.parse(text);
-    const next = new Map();
-    for (const jwk of jwks || []) {
-      if (jwk.kty !== 'RSA' || !jwk.kid) continue;
-      try { next.set(jwk.kid, crypto.createPublicKey({ key: jwk, format: 'jwk' })); } catch { /* skip */ }
-    }
-    if (!next.size) throw new Error('jwks empty');
-    keys = next;
-    keysFetchedAt = Date.now();
-  })();
-  try { await keysInFlight; } finally { keysInFlight = null; }
-}
-async function keyFor(kid) {
-  const now = Date.now();
-  const stale = now - keysFetchedAt > JWKS_MAX_AGE_MS;
-  if (stale || (!keys.has(kid) && now - lastKeyMiss > 60_000)) {
-    if (!keys.has(kid)) lastKeyMiss = now;
-    await refreshKeys(); // a stale cache is not trusted: failure here is a 503
-  }
-  return keys.get(kid);
-}
-
-// ---- token validation --------------------------------------------------------
+// ---- token pre-check ---------------------------------------------------------
+// Claims only. The signature is not checked here: Softeria exchanges the token
+// with Microsoft On-Behalf-Of the user, and Microsoft rejects an assertion that
+// is forged, expired or for another audience, so no Graph token and no data
+// result. (Softeria's maintainer prefers that proxies do not re-implement token
+// signature checks: key rotation, v1 tokens and national clouds; Softeria#696.)
+// This pre-check only turns away tokens that are plainly not for this relay
+// with a clean 401, and applies the tenant and user allowlists.
 
 function b64json(part) {
   return JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
 }
 // Returns { ok: true, claims } or { ok: false, cat } — the category is logged,
 // never sent to the client.
-async function validate(token) {
+function precheck(token) {
   const parts = token.split('.');
   if (parts.length !== 3) return { ok: false, cat: 'token_malformed' };
-  let header, claims;
-  try { header = b64json(parts[0]); claims = b64json(parts[1]); } catch { return { ok: false, cat: 'token_malformed' }; }
-  if (header.alg !== 'RS256') return { ok: false, cat: 'token_alg' };
-  const key = await keyFor(header.kid);
-  if (!key) return { ok: false, cat: 'token_unknown_key' };
-  const ok = crypto.verify('RSA-SHA256', Buffer.from(`${parts[0]}.${parts[1]}`), key, Buffer.from(parts[2], 'base64url'));
-  if (!ok) return { ok: false, cat: 'token_signature' };
+  let claims;
+  try { claims = b64json(parts[1]); } catch { return { ok: false, cat: 'token_malformed' }; }
+  if (!claims || typeof claims !== 'object') return { ok: false, cat: 'token_malformed' };
   const now = Math.floor(Date.now() / 1000);
   if (typeof claims.exp !== 'number' || claims.exp + CLOCK_SKEW < now) return { ok: false, cat: 'token_expired' };
   if (typeof claims.nbf === 'number' && claims.nbf - CLOCK_SKEW > now) return { ok: false, cat: 'token_not_yet_valid' };
@@ -365,7 +310,7 @@ async function validate(token) {
   if (claims.aud !== CLIENT_ID) return { ok: false, cat: 'token_audience' };
   if (!ALLOWED_TIDS.includes(claims.tid)) return { ok: false, cat: 'token_tenant' };
   if (claims.iss !== `https://login.microsoftonline.com/${claims.tid}/v2.0`) return { ok: false, cat: 'token_issuer' };
-  if (!(claims.scp || '').split(' ').includes(REQUIRED_SCOPE)) return { ok: false, cat: 'token_scope' };
+  if (!(typeof claims.scp === 'string' ? claims.scp : '').split(' ').includes(REQUIRED_SCOPE)) return { ok: false, cat: 'token_scope' };
   if (ALLOWED_USERS.length && !ALLOWED_USERS.includes(claims.oid)) return { ok: false, cat: 'token_user' };
   return { ok: true, claims };
 }
@@ -531,29 +476,20 @@ async function isDraft(authorization, messageId, ctx) {
   return m && m.isDraft === true;
 }
 
-// Graph access for read-mail-text, as the calling user, through Softeria's
-// graph-batch tool (OBO exchange stays in Softeria). A GET is a one-request batch.
-function graphAsUser(authorization, ctx) {
-  return async (method, p, body, headers) => {
-    if (method === 'POST' && p === '/$batch') {
-      return { status: 200, body: await callUpstreamTool(authorization, 'graph-batch', { body }, ctx) };
-    }
-    const r = await callUpstreamTool(authorization, 'graph-batch', { body: { requests: [{ id: '1', method, url: p, headers: headers || {} }] } }, ctx);
-    const one = r && Array.isArray(r.responses) ? r.responses.find((x) => String(x.id) === '1') : null;
-    if (!one) throw Object.assign(new Error('graph'), { cat: 'graph_error' });
-    return { status: one.status, body: one.body };
-  };
-}
+// read-mail-text runs Softeria's own tools as the calling user (graph-batch,
+// list-mail-folder-messages), so the OBO exchange and $search normalisation
+// stay in Softeria.
+const callAsUser = (authorization, ctx) => (name, args) => callUpstreamTool(authorization, name, args, ctx);
 
 async function handleReadMailText(ctx, rpc) {
   try {
-    const out = await mailText.readMailText(rpc.params.arguments, graphAsUser(ctx.req.headers.authorization, ctx), READ_MAIL_TEXT_MAX_CHARS);
+    const out = await mailText.readMailText(rpc.params.arguments, callAsUser(ctx.req.headers.authorization, ctx), READ_MAIL_TEXT_MAX_CHARS);
     logReq(ctx, 200, 'read_mail_text', { messages: out.length });
     return rpcResult(ctx, rpc.id, out);
   } catch (e) {
     if (e instanceof mailText.ToolError) { logReq(ctx, 200, 'read_mail_text_refused'); return rpcResult(ctx, rpc.id, { error: e.message }, true); }
     logReq(ctx, 200, e.cat || 'read_mail_text_failed');
-    return rpcResult(ctx, rpc.id, { error: 'read_failed', category: e.cat || 'internal' }, true);
+    return rpcResult(ctx, rpc.id, { error: 'read_failed', category: e.cat || 'internal', hint: 'If you passed filter or search, check its syntax; otherwise retry.' }, true);
   }
 }
 
@@ -656,8 +592,7 @@ const server = http.createServer(async (req, res) => {
   if (GATE_KEY && !timingSafeEqual(req.headers['x-api-key'] || '', GATE_KEY)) return reject(ctx, 401, 'apikey', 'invalid_request', 'invalid request');
   const auth = req.headers.authorization || '';
   if (!auth.startsWith('Bearer ')) return reject(ctx, 401, 'token_missing', 'invalid_token', 'invalid token');
-  let v;
-  try { v = await validate(auth.slice(7)); } catch { return reject(ctx, 503, 'jwks_unavailable', 'server_error', 'temporarily unavailable'); }
+  const v = precheck(auth.slice(7));
   if (!v.ok) return reject(ctx, 401, v.cat, 'invalid_token', 'invalid token');
   ctx.user = v.claims.oid || v.claims.sub || 'unknown';
 

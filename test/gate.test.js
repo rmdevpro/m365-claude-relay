@@ -1,23 +1,22 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { CLIENT_ID, POLICY, makeSigner, startJwks, startStallingJwks, startRedirectingJwks, startUpstream, startGate, call } = require('./helpers');
+const { CLIENT_ID, POLICY, makeSigner, startUpstream, startGate, call } = require('./helpers');
 
 const RPC = (method, params, id = 1) => JSON.stringify({ jsonrpc: '2.0', id, method, params });
 const H = (tok) => ({ authorization: `Bearer ${tok}`, 'content-type': 'application/json', accept: 'application/json' });
 const DRAFT = 'DRAFT-AAMkADAwATMwMAItYzhhMC1mMjIBLTAwAi0wMAoARgAAA';
 const SENT = 'SENT-AAMkADAwATMwMAItYzhhMC1mMjIBLTAwAi0wMAoARgAAA';
 
-let signer, jwks, up, gate;
-const baseEnv = () => ({ UPSTREAM_PORT: String(up.port), GATE_JWKS_URI: `http://127.0.0.1:${jwks.port}/` });
+let signer, up, gate;
+const baseEnv = () => ({ UPSTREAM_PORT: String(up.port) });
 const NEUTRAL = { draftOnly: false, rejectToolNotifications: false }; // tests that exercise the switches turn them on explicitly
 
 test.before(async () => {
   signer = makeSigner();
-  jwks = await startJwks(signer.jwk);
   up = await startUpstream();
   gate = await startGate(baseEnv(), { policy: NEUTRAL });
 });
-test.after(() => { gate.close(); up.close(); jwks.close(); });
+test.after(() => { gate.close(); up.close(); });
 
 // ---- configuration validation ------------------------------------------------
 test('bad or unapproved config fails startup', async () => {
@@ -25,8 +24,8 @@ test('bad or unapproved config fails startup', async () => {
     { GATE_READ_MAIL_TEXT_MAX_CHARS: 'not-a-number' }, { GATE_READ_MAIL_TEXT_MAX_CHARS: '10' }, { GATE_RATE_LIMIT_PER_MIN: '-1' },
     { MS365_MCP_PUBLIC_URL: 'http://relay.example', GATE_ALLOW_INSECURE_TEST: '0' }, { MS365_MCP_PUBLIC_URL: '' }, { MS365_MCP_CLIENT_ID: 'nope' },
     { MS365_MCP_TENANT_ID: 'contoso' }, { GATE_DRAFT_ONLY: 'maybe' },
-    { GATE_ALLOW_INSECURE_TEST: '0', GATE_JWKS_URI: 'http://127.0.0.1:1/' },                       // http JWKS outside tests
-    { GATE_ALLOW_INSECURE_TEST: '0', GATE_JWKS_URI: 'https://evil.example/keys' },                  // unapproved origin
+    { GATE_JWKS_URI: 'https://login.microsoftonline.com/common/discovery/v2.0/keys' },              // retired: no signature check in the gate
+    { GATE_JWKS_MAX_AGE_SECONDS: '600' },
     { GATE_ALLOW_INSECURE_TEST: '0', MS365_MCP_ATTACHMENT_URL_BASE: 'https://other.example' },      // unapproved attachment origin
     { MS365_MCP_ALLOWED_SCOPES: 'Mail.Read' }, { MS365_MCP_ALLOWED_SCOPES: 'Mail.ReadWrite bad scope!' },  // scopes: drafts need Mail.ReadWrite; bad name
     { MS365_MCP_EXTRA_SCOPES: 'Files.ReadWrite.All' },                                            // consent list must equal the allowed list
@@ -60,7 +59,7 @@ test('policy schema is strict: wrong types and shapes fail startup, never weaken
     assert.match(r.out, /"cat":"config"/);
   }
   const { description, ...noDesc } = POLICY;
-  const g = await startGate({ UPSTREAM_PORT: String(up.port), GATE_JWKS_URI: `http://127.0.0.1:${jwks.port}/` }, { rawPolicy: noDesc });
+  const g = await startGate({ UPSTREAM_PORT: String(up.port) }, { rawPolicy: noDesc });
   g.close();
 });
 
@@ -77,7 +76,6 @@ test('operator scopes: MS365_MCP_ALLOWED_SCOPES overrides the policy default; /h
 });
 
 test('approved attachment origin is accepted', async () => {
-  // Real (https) JWKS default; nothing is fetched until a token arrives.
   const g = await startGate({ UPSTREAM_PORT: String(up.port), GATE_ALLOW_INSECURE_TEST: '0', MS365_MCP_ATTACHMENT_URL_BASE: 'https://relay.example' });
   g.close();
 });
@@ -89,15 +87,16 @@ async function waitForLog(g, needle, ms = 2000) {
 }
 
 // ---- token validation --------------------------------------------------------
-test('token rejection matrix: all 401 with a generic body; reason only in the log', async () => {
+test('token pre-check matrix: all 401 with a generic body; reason only in the log', async () => {
   const cases = {
     token_audience: signer.mint({ aud: 'x' }),
     token_expired: signer.mint({ exp: 1 }),
+    token_not_yet_valid: signer.mint({ nbf: Math.floor(Date.now() / 1000) + 3600 }),
     token_tenant: signer.mint({ tid: 't2', iss: 'https://login.microsoftonline.com/t2/v2.0' }),
+    token_issuer: signer.mint({ iss: 'https://evil.example/v2.0' }),
     token_scope: signer.mint({ scp: 'User.Read' }),
     token_version: signer.mint({ ver: '1.0' }),
-    token_unknown_key: signer.mint({}, { kid: 'nope' }),
-    token_signature: signer.mint().slice(0, -4) + 'AAAA',
+    token_malformed: 'a.b',
   };
   for (const [cat, tok] of Object.entries(cases)) {
     const r = await call(gate.port, '/mcp', { headers: H(tok), body: RPC('initialize', {}) });
@@ -157,22 +156,19 @@ test('rate-key map is bounded', async () => {
   } finally { g.close(); }
 });
 
-test('JWKS: header-only stall honours the deadline; cross-origin redirect is refused', async () => {
-  const stall = await startStallingJwks();
-  const g1 = await startGate({ ...baseEnv(), GATE_JWKS_URI: `http://127.0.0.1:${stall.port}/`, GATE_JWKS_TIMEOUT_MS: '1000' }, { policy: NEUTRAL });
+test('the signature is not checked by the gate: a claims-valid token goes to Softeria, whose OBO exchange with Microsoft rejects a forgery', async () => {
+  up.seen.length = 0;
+  const forged = signer.mint().slice(0, -4) + 'AAAA';
+  const r = await call(gate.port, '/mcp', { headers: H(forged), body: RPC('ping', {}) });
+  assert.equal(r.status, 200);
+  assert.equal(up.seen.length, 1);
+  assert.equal(up.seen[0].headers.authorization, `Bearer ${forged}`);
+  const allowlisted = await startGate({ ...baseEnv(), GATE_ALLOWED_USERS: 'oid-ok' }, { policy: NEUTRAL });
   try {
-    const t0 = Date.now();
-    const r = await call(g1.port, '/mcp', { headers: H(signer.mint()), body: RPC('initialize', {}) });
-    assert.equal(r.status, 503);
-    assert.ok(Date.now() - t0 < 2500, `answered in ${Date.now() - t0} ms`);
-  } finally { g1.close(); stall.close(); }
-  const redir = await startRedirectingJwks(`http://127.0.0.1:${jwks.port}/`);
-  const g2 = await startGate({ ...baseEnv(), GATE_JWKS_URI: `http://127.0.0.1:${redir.port}/` }, { policy: NEUTRAL });
-  try {
-    const r = await call(g2.port, '/mcp', { headers: H(signer.mint()), body: RPC('initialize', {}) });
-    assert.equal(r.status, 503, 'redirect to the real JWKS is refused, not followed');
-    assert.ok(await waitForLog(g2, '"cat":"jwks_unavailable"'));
-  } finally { g2.close(); redir.close(); }
+    assert.equal((await call(allowlisted.port, '/mcp', { headers: H(signer.mint({ oid: 'oid-other' })), body: RPC('ping', {}) })).status, 401);
+    assert.ok(await waitForLog(allowlisted, '"cat":"token_user"'));
+    assert.equal((await call(allowlisted.port, '/mcp', { headers: H(signer.mint({ oid: 'oid-ok' })), body: RPC('ping', {}) })).status, 200);
+  } finally { allowlisted.close(); }
 });
 
 // ---- routes ------------------------------------------------------------------
@@ -338,8 +334,16 @@ test('read-mail-text: answered by the gate through graph-batch as the caller, cl
   assert.equal(sent.params.name, 'graph-batch');
   assert.equal(sent.params.arguments.body.requests[0].headers.Prefer, 'outlook.body-content-type="text"');
   assert.equal(up.seen[0].headers.authorization, `Bearer ${tok}`);
-  const f = JSON.parse((await call(gate.port, '/mcp', { headers: H(tok), body: RPC('tools/call', { name: 'read-mail-text', arguments: { folderId: 'inbox', top: 2 } }) })).json.result.content[0].text);
+  up.seen.length = 0;
+  const f = JSON.parse((await call(gate.port, '/mcp', { headers: H(tok), body: RPC('tools/call', { name: 'read-mail-text', arguments: { folderId: 'inbox', top: 2, search: 'subject:"q report"' } }) })).json.result.content[0].text);
   assert.deepEqual(f.map((m) => m.text), ['Body F1', 'Body F2']);
+  const lst = JSON.parse(up.seen[0].body).params;
+  assert.equal(lst.name, 'list-mail-folder-messages');
+  assert.deepEqual([lst.arguments.mailFolderId, lst.arguments.top, lst.arguments.search], ['inbox', 2, 'subject:"q report"']);
+  assert.equal(up.seen[0].headers.authorization, `Bearer ${tok}`);
+  const badFilter = await call(gate.port, '/mcp', { headers: H(tok), body: RPC('tools/call', { name: 'read-mail-text', arguments: { folderId: 'inbox', filter: 'bad' } }) });
+  assert.equal(badFilter.json.result.isError, true);
+  assert.equal(JSON.parse(badFilter.json.result.content[0].text).error, 'read_failed');
   const bad = await call(gate.port, '/mcp', { headers: H(tok), body: RPC('tools/call', { name: 'read-mail-text', arguments: {} }) });
   assert.equal(bad.json.result.isError, true);
   assert.match(JSON.parse(bad.json.result.content[0].text).error, /messageIds or folderId/);

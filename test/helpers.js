@@ -1,5 +1,5 @@
-// Test helpers: a local JWKS + token minter, a mock Softeria upstream and a
-// gate launcher. Loopback only; no real
+// Test helpers: a token minter (the gate checks claims, not signatures), a
+// mock Softeria upstream and a gate launcher. Loopback only; no real
 // credentials. GATE_ALLOW_INSECURE_TEST=1 lets the gate accept http loopback
 // origins; deployments never set it.
 const http = require('http');
@@ -25,15 +25,20 @@ function makeSigner() {
   return { jwk, mint };
 }
 
+// A port the OS reports free right now (bound to 0, then released). Fixed random
+// ranges collide with ephemeral ports other suites' servers get from the OS.
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = require('net').createServer();
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => { const { port } = srv.address(); srv.close(() => resolve(port)); });
+  });
+}
+
 function listen(server) {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 }
 
-async function startJwks(jwk) {
-  const s = http.createServer((q, r) => { r.writeHead(200, { 'content-type': 'application/json' }); r.end(JSON.stringify({ keys: [jwk] })); });
-  const port = await listen(s);
-  return { port, close: () => s.close() };
-}
 
 // Mock upstream: records every request; answers MCP methods; serves "/".
 async function startUpstream(opts = {}) {
@@ -65,9 +70,13 @@ async function startUpstream(opts = {}) {
               return text({ responses: args.body.requests.map((rq) => {
                 const mm = /^\/me\/messages\/([^?]+)\?/.exec(rq.url);
                 if (mm) return decodeURIComponent(mm[1]).startsWith('MISSING') ? { id: rq.id, status: 404, body: { error: { code: 'ErrorItemNotFound' } } } : { id: rq.id, status: 200, body: msg(decodeURIComponent(mm[1])) };
-                if (rq.url.startsWith('/me/mailFolders/')) return { id: rq.id, status: 200, body: { value: [msg('F1'), msg('F2')] } };
                 return { id: rq.id, status: 400, body: { error: { code: 'BadRequest' } } };
               }) });
+            }
+            if (name === 'list-mail-folder-messages') {
+              if (args.filter === 'bad') return { jsonrpc: '2.0', id: m.id, result: { content: [{ type: 'text', text: 'BadRequest' }], isError: true } };
+              const msg = (id) => ({ id, subject: `S-${id}`, body: { contentType: 'text', content: `Body ${id}` }, from: { emailAddress: { address: 'p@example.com' } } });
+              return text({ value: [msg('F1'), msg('F2')] });
             }
             return text({ called: name });
           }
@@ -87,21 +96,6 @@ const fs = require('fs');
 const os = require('os');
 const POLICY = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'policy.json'), 'utf8'));
 
-// JWKS that sends headers then never finishes the body (deadline test).
-async function startStallingJwks() {
-  const sockets = new Set();
-  const s = http.createServer((q, r) => { r.writeHead(200, { 'content-type': 'application/json' }); r.write('{"keys":['); });
-  s.on('connection', (c) => sockets.add(c));
-  const port = await listen(s);
-  return { port, close: () => { for (const c of sockets) c.destroy(); s.close(); } };
-}
-// JWKS that redirects to another origin (redirect-refusal test).
-async function startRedirectingJwks(target) {
-  const s = http.createServer((q, r) => { r.writeHead(302, { location: target }); r.end(); });
-  const port = await listen(s);
-  return { port, close: () => s.close() };
-}
-
 // `policy` = overrides merged into the committed policy; `rawPolicy` = used
 // verbatim (schema tests). Either way the gate runs as a COPY of gate.js in a
 // temp dir next to that policy.json: there is no runtime mechanism to point a
@@ -115,7 +109,7 @@ async function startGate(env, { expectExit, policy, rawPolicy } = {}) {
     fs.writeFileSync(path.join(dir, 'policy.json'), typeof rawPolicy === 'string' ? rawPolicy : JSON.stringify(rawPolicy || { ...POLICY, ...policy }));
     gatePath = path.join(dir, 'gate.js');
   }
-  const port = 20000 + Math.floor(Math.random() * 20000);
+  const port = await freePort();
   const child = spawn(process.execPath, [gatePath], {
     env: { PATH: process.env.PATH, PORT: String(port), HOST: '127.0.0.1', MS365_MCP_PUBLIC_URL: 'https://relay.example', MS365_MCP_CLIENT_ID: CLIENT_ID, GATE_ALLOW_INSECURE_TEST: '1', ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -142,4 +136,4 @@ async function call(port, path, { method = 'POST', headers = {}, body } = {}) {
   return { status: res.status, headers: res.headers, text, json };
 }
 
-module.exports = { CLIENT_ID, CONSUMERS_TID, POLICY, makeSigner, startJwks, startStallingJwks, startRedirectingJwks, startUpstream, startGate, call };
+module.exports = { freePort, CLIENT_ID, CONSUMERS_TID, POLICY, makeSigner, startUpstream, startGate, call };

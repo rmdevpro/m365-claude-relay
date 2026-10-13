@@ -12,7 +12,7 @@ const assert = require('node:assert/strict');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
-const { POLICY, CLIENT_ID, makeSigner, startJwks, startGate, call } = require('./helpers');
+const { POLICY, CLIENT_ID, makeSigner, startGate, call, freePort } = require('./helpers');
 
 const RPC = (method, params, id = 1) => JSON.stringify({ jsonrpc: '2.0', id, method, params });
 const H = (tok) => ({ authorization: `Bearer ${tok}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' });
@@ -25,9 +25,8 @@ const BIN = path.join(__dirname, '..', 'node_modules', '.bin', 'ms-365-mcp-serve
 // hidden tools, plus read-mail-text = 138. Re-check on every Softeria bump.
 const EXPECTED_TOOLS = 138;
 
-let signer, jwks, gate, softeria, gateObo, softeriaObo;
-const UP_PORT = 30000 + Math.floor(Math.random() * 10000);
-const OBO_PORT = UP_PORT + 1;
+let signer, gate, softeria, gateObo, softeriaObo;
+let UP_PORT, OBO_PORT;
 
 // MCP calls under --obo need a real Entra exchange, so the MCP surface runs on a
 // plain --http instance with the same scopes and exclusions (the surface is the
@@ -57,16 +56,17 @@ async function waitUp(port) {
 test.before(async () => {
   if (!fs.existsSync(BIN)) throw new Error('run npm ci first');
   signer = makeSigner();
-  jwks = await startJwks(signer.jwk);
+  UP_PORT = await freePort();
+  OBO_PORT = await freePort();
   softeria = startSofteria(UP_PORT, []);
   softeriaObo = startSofteria(OBO_PORT, ['--obo']);
   await waitUp(UP_PORT); await waitUp(OBO_PORT);
-  const env = { GATE_JWKS_URI: `http://127.0.0.1:${jwks.port}/`, MS365_MCP_ALLOWED_SCOPES: SCOPES, MS365_MCP_EXTRA_SCOPES: SCOPES };
+  const env = { MS365_MCP_ALLOWED_SCOPES: SCOPES, MS365_MCP_EXTRA_SCOPES: SCOPES };
   gate = await startGate({ ...env, UPSTREAM_PORT: String(UP_PORT) }, { policy: { rejectToolNotifications: false } });
   gateObo = await startGate({ ...env, UPSTREAM_PORT: String(OBO_PORT) });
 });
 test.after(() => {
-  gate.close(); gateObo.close(); softeria.kill(); softeriaObo.kill(); jwks.close();
+  gate.close(); gateObo.close(); softeria.kill(); softeriaObo.kill();
   for (const p of [UP_PORT, OBO_PORT]) fs.rmSync(`/tmp/ms365-it-${p}`, { recursive: true, force: true });
 });
 
