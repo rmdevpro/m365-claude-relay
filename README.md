@@ -56,6 +56,7 @@ Sources (September 2026): [Microsoft 365 connector](https://claude.com/docs/conn
    Work tenant: add `-e MS365_MCP_ORG_MODE=true`. `https://relay.example.com/` answers
    "Microsoft 365 MCP Server is running"; the startup log line shows the scopes and allowlist.
 3. Add the connector in Claude and upload the skill — [docs/claude.md](docs/claude.md).
+4. Verify before anyone relies on it — [docs/deploy-and-verify.md](docs/deploy-and-verify.md) (outside probes, then a checklist through Claude including a file round trip).
 
 Change scopes later: edit `MS365_MCP_ALLOWED_SCOPES`, restart. No rebuild.
 
