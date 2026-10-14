@@ -164,7 +164,7 @@ Every user acts as themselves; the relay has no standing access to any mailbox.
 | Name | Kind | Value |
 |---|---|---|
 | `MS365_MCP_CLIENT_ID` | variable | relay app registration (application) id — **required** |
-| `MS365_MCP_CLIENT_SECRET` | **secret** | relay app registration client secret (production: prefer a certificate credential) |
+| `MS365_MCP_CLIENT_SECRET` | **secret** | relay app registration client secret (keep it in the platform's secret store; rotate before it expires) |
 | `MS365_MCP_TENANT_ID` | variable | `consumers` (personal accounts) or the tenant GUID; with a tenant, also set `MS365_MCP_ORG_MODE=true` |
 | `MS365_MCP_ALLOWED_SCOPES` | variable | Graph delegated scopes users consent to; the tool surface is derived from them at every start. Default: `policy.json` `scopes`. Change → restart (and admin-consent the permission on the app registration) |
 | `MS365_MCP_ORG_MODE` | variable | `true` for a work tenant (Teams/SharePoint/… tools become available to work scopes) |
