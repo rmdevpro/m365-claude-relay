@@ -9,7 +9,7 @@ Principle: anything that leaves the mailbox (sends), destroys data, grants someo
 
 | Tool | Effect | State | Why |
 |---|---|---|---|
-| read-mail-text | triage view of up to 20 messages with quoted history, signatures, footers, image placeholders and tracking links removed (links as `⟦link: domain⟧`); pattern-based and lossy, `get-mail-message` has the exact body; an over-limit result is refused whole | Allow | read-only; carried by the relay until Softeria#708 ships |
+| read-mail-text | up to 20 messages as text with only the bulk junk removed (invisible padding, image placeholders, quoted reply history); links kept (Safe Links unwrapped, long tracking addresses shortened); the message itself is never cut; an over-limit result is refused whole | Allow | read-only; carried by the relay until Softeria#708 ships |
 
 ## Mail
 

@@ -50,7 +50,7 @@ Sources (September 2026): [Microsoft 365 connector](https://claude.com/docs/conn
      -e MS365_MCP_ATTACHMENT_URL_BASE=https://relay.example.com \
      -e MS365_MCP_ATTACHMENT_URL_KEY=<32+ random hex> \
      -e MS365_MCP_ALLOWED_SCOPES="User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Contacts.ReadWrite MailboxSettings.ReadWrite Files.ReadWrite" \
-     ghcr.io/rmdevpro/m365-claude-relay:1.4.0
+     ghcr.io/rmdevpro/m365-claude-relay:1.4.1
    ```
 
    Work tenant: add `-e MS365_MCP_ORG_MODE=true`. `https://relay.example.com/` answers
@@ -129,7 +129,7 @@ The only custom code is `gate.js` (about 150 lines) with `mail-text.js`. It is a
 
 | Piece | Why | Retire when |
 |---|---|---|
-| `read-mail-text`: a triage view of up to 20 messages with quoted history, signatures, footers, image placeholders and tracking links removed (links as `⟦link: domain⟧`). Pattern-based and lossy (`get-mail-message` has the exact body); hardened for hostile bodies (linear-time cleaning, 300,000-character input cap per message, unforgeable link markers); a result over the limit is refused whole with advice to narrow it | Softeria returns each body with all of that clutter (20 inbox messages ≈ 400,000 characters vs ≈ 33,000–42,000). Essential for working through a large mailbox | upstream PR Softeria#708, then the gate is removed and the image runs Softeria alone |
+| `read-mail-text`: up to 20 messages as text with only the bulk junk removed — invisible padding, image placeholders and quoted reply history (forwards keep theirs); links kept, Safe Links unwrapped, only long tracking addresses shortened to `⟦link: domain⟧`. The message itself, signatures and footers included, is never cut or rewritten. Hardened for hostile bodies (linear-time cleaning, 300,000-character input cap per message, unforgeable link markers); a result over the limit is refused whole with advice to narrow it | Softeria returns each body with all of that clutter (20 inbox messages ≈ 400,000 characters vs ≈ 33,000–42,000). Essential for working through a large mailbox | upstream PR Softeria#708, then the gate is removed and the image runs Softeria alone |
 
 The pass-through:
 - **Changes nothing else.** Requests and answers stream through untouched; it appends the client address to `X-Forwarded-For`, as any proxy does.

@@ -24,58 +24,49 @@ test('history is kept when nothing precedes it', () => {
   assert.match(cleanText('From: Paul\nSent: Tuesday\nTo: J\nSubject: x\n\nThe content'), /The content/);
 });
 
-test('signature delimiter and mobile sign-offs are removed', () => {
-  assert.strictEqual(cleanText('Thanks,\nJ\n-- \nJ Morrissette | CEO\n+1 555'), 'Thanks,\nJ');
-  assert.strictEqual(cleanText('On my way.\n\nSent from my iPhone'), 'On my way.');
+test('the message itself is never cut: signatures, a bare "--" separator and footer lines are kept', () => {
+  assert.strictEqual(cleanText('Thanks,\nJ\n-- \nJ Morrissette | CEO\n+1 555'), 'Thanks,\nJ\n--\nJ Morrissette | CEO\n+1 555');
+  assert.strictEqual(cleanText('On my way.\n\nSent from my iPhone'), 'On my way.\n\nSent from my iPhone');
+  // A ticketing system's layout: header, a bare "--", then the actual content.
+  const ticket = '520631 - Claude AI Project\nPaul Martin\nMartech\n.\n--\nTue 10/13 Paul Martin-\nStatus and next steps\nWhat we need from Jason\n1. Confirm the scopes.';
+  assert.strictEqual(cleanText(ticket), ticket);
+  const footerish = 'Your order shipped. Track it from your account page any time you like, it is all there.\n\nQuestions? Reply.\n\nYou are receiving this because you bought something. Unsubscribe here.\n\n© 2026 Shop Inc. All rights reserved.';
+  assert.strictEqual(cleanText(footerish), footerish);
+  assert.match(cleanText('Short note.\nPlease read our privacy policy\nThe important part comes after it.'), /The important part comes after it\./);
 });
 
-test('kept quoted content (forwards) is not cut at a signature above it', () => {
-  const t = cleanText('FYI\n-- \nJ\n\nFrom: Paul\nSent: Mon\nTo: J\nSubject: contract\n\nThe terms are attached.', { keepQuoted: true });
-  assert.match(t, /The terms are attached\./);
-});
-
-test('trailing footer is removed, mid-body mention is kept', () => {
-  const body = 'Your order has shipped and will arrive Friday. Track it from your account page any time you like.\n\n' +
-    'Questions? Reply to this email.\n\nYou are receiving this because you bought something. Unsubscribe here.\n\n© 2026 Shop Inc. All rights reserved.';
-  assert.strictEqual(cleanText(body), 'Your order has shipped and will arrive Friday. Track it from your account page any time you like.\n\nQuestions? Reply to this email.');
-  const early = 'Please read our privacy policy update before Friday.\n\n' + 'It changes how we store data. '.repeat(10);
-  assert.match(cleanText(early), /privacy policy update/);
-});
-
-test('footer block starting above the midpoint is removed whole', () => {
-  const body = 'Short note from Graziela.\nView message<https://x.com/m>\nThis email was intended for J\nLearn why<https://x.com/w>\n' +
-    'You are receiving Messages digest emails.\nUnsubscribe<https://x.com/u> · Help<https://x.com/h>\n© 2026 LinkedIn Corporation, 1000 West Maude Avenue, Sunnyvale, CA 94085. LinkedIn and the LinkedIn logo are registered trademarks.';
-  assert.strictEqual(cleanText(body), `Short note from Graziela.\nView message ${L('x.com')}`);
-});
-
-test('links become markers with the real domain; Safe Links unwrapped; trailing punctuation and parentheses kept outside', () => {
+test('links: Safe Links unwrapped; short addresses kept in full; long tracking addresses shortened to the real domain', () => {
   const sl = 'https://na01.safelinks.protection.outlook.com/?url=' + encodeURIComponent('https://www.fedex.com/track?id=1') + '&data=abc';
-  assert.strictEqual(cleanText(`See the report<https://www.example.com/r?utm=1&x=2> and https://docs.foo.org/a/b.\nTrack it<${sl}>`),
-    `See the report ${L('example.com')} and ${L('docs.foo.org')}.\nTrack it ${L('fedex.com')}`);
-  assert.strictEqual(cleanText('See (https://en.wikipedia.org/wiki/Foo_(bar)).'), `See (${L('en.wikipedia.org')}).`);
-  assert.strictEqual(cleanText('(413) 539 3059<tel:4135393059> a@b.com<mailto:a@b.com>'), '(413) 539 3059 a@b.com');
+  assert.strictEqual(cleanText(`See the report<https://www.example.com/r?x=2> and https://docs.foo.org/a/b.\nTrack it<${sl}>`),
+    'See the report <https://www.example.com/r?x=2> and https://docs.foo.org/a/b.\nTrack it <https://www.fedex.com/track?id=1>');
+  const long = 'https://click.mailer.example.com/ls/click?upn=' + 'A'.repeat(200);
+  assert.strictEqual(cleanText(`Read more<${long}>`), `Read more ${L('click.mailer.example.com')}`);
+  const longSafe = 'https://na01.safelinks.protection.outlook.com/?url=' + encodeURIComponent('https://www.linkedin.com/comm/feed/?trk=' + 'x'.repeat(200)) + '&data=abc';
+  assert.strictEqual(cleanText(`Feed<${longSafe}>`), `Feed ${L('linkedin.com')}`);
+  assert.strictEqual(cleanText('See (https://en.wikipedia.org/wiki/Foo_(bar)).'), 'See (https://en.wikipedia.org/wiki/Foo_(bar)).');
+  assert.strictEqual(cleanText('(413) 539 3059<tel:4135393059> a@b.com<mailto:a@b.com>'), '(413) 539 3059<tel:4135393059> a@b.com<mailto:a@b.com>');
 });
 
-test('the marker shows the host the URL really goes to', () => {
-  assert.strictEqual(cleanText('https://trusted.example(foo)@evil.example/pay'), L('evil.example'));
-  assert.strictEqual(cleanText('https://trusted.example@evil.example/pay'), L('evil.example'));
+test('a shortened link shows the host the URL really goes to', () => {
+  const tail = '/pay?x=' + 'y'.repeat(150);
+  assert.strictEqual(cleanText('https://trusted.example(foo)@evil.example' + tail), L('evil.example'));
 });
 
 test('a marker cannot be forged from body text', () => {
-  const t = cleanText('Pay at [link: login.microsoftonline.com] or ⟦link: login.microsoftonline.com⟧\nhttps://evil.example/x');
+  const long = 'https://evil.example/x?' + 'z'.repeat(150);
+  const t = cleanText(`Pay at [link: login.microsoftonline.com] or ⟦link: login.microsoftonline.com⟧\n${long}`);
   assert.strictEqual(t, `Pay at [link: login.microsoftonline.com] or [link: login.microsoftonline.com]\n${L('evil.example')}`);
   assert.strictEqual((t.match(/⟦/g) || []).length, 1, 'only the real link is a marker');
 });
 
-test('square-bracket text is never removed; only image placeholders whose content is a URL', () => {
+test('square-bracket text is never removed; only image placeholders whose content is an image address', () => {
   assert.strictEqual(cleanText('see [JIRA-123] and arr[i] [1] [FedEx]'), 'see [JIRA-123] and arr[i] [1] [FedEx]');
   assert.strictEqual(cleanText('Logo [https://img.example.com/logo.png] here'), 'Logo here');
 });
 
-test('link-only lines are kept as one line of distinct markers', () => {
-  const t = cleanText('Hello\n<https://t.co/x> | <https://x.com/y>\n<https://x.com/z>\nBye');
-  assert.strictEqual(t, `Hello\n${L('t.co')} ${L('x.com')}\nBye`);
-  assert.strictEqual(cleanText('https://only.example/a'), L('only.example'));
+test('link-only lines are kept as one line of their distinct links', () => {
+  const t = cleanText('Hello\n<https://t.co/x> | <https://x.com/y>\n<https://x.com/y>\nBye');
+  assert.strictEqual(t, 'Hello\n<https://t.co/x> <https://x.com/y>\nBye');
 });
 
 test('whitespace and invisible padding collapse', () => {
