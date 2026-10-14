@@ -8,11 +8,9 @@
 // per-call audit log. This gate is the minimal custom delta, each piece
 // justified in README.md:
 //
-//   1. Inbound relay-token pre-check before OBO: the claims only (lifetime,
-//      version, aud, tid, iss, scope, optional user allowlist), so a token
-//      meant for something else gets a clean 401. The signature is verified by
-//      Microsoft itself when Softeria exchanges the token On-Behalf-Of the user:
-//      a forged token gets no Graph token and no data.
+//   1. (Token checks are Softeria's since 0.166.0: Entra verifies the assertion
+//      at the On-Behalf-Of exchange, Softeria answers 401 when it is rejected
+//      and enforces the tenant/user allowlist. The gate only requires a bearer.)
 //   2. /authorize: the caller's scope is replaced by the relay scope; Softeria
 //      adds the configured Graph scopes (the caller cannot widen consent).
 //   3. MCP glue: hide the OTS primitives that get-upload-url supersedes, refuse
@@ -70,7 +68,6 @@ function parseOrigin(name, raw, { httpsOnly }) {
 }
 
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const CONSUMERS_TID = '9188040d-6c67-4c5b-b112-36a304b66dad'; // Microsoft personal-account tenant
 
 // Test override: allows http origins (loopback upstream) in the test suite
 // only. Never set in a deployment; startup logs a warning when it is on.
@@ -91,14 +88,17 @@ const PUBLIC_HOST = PUBLIC_U.host;
 const CLIENT_ID = (process.env.MS365_MCP_CLIENT_ID || '').trim();
 if (!GUID.test(CLIENT_ID)) fatal('MS365_MCP_CLIENT_ID must be the relay app (client) id GUID');
 const TENANT = (process.env.MS365_MCP_TENANT_ID || 'consumers').trim();
-const ALLOWED_TIDS = list(process.env.GATE_ALLOWED_TIDS).length
-  ? list(process.env.GATE_ALLOWED_TIDS)
-  : [TENANT === 'consumers' ? CONSUMERS_TID : TENANT];
-for (const t of ALLOWED_TIDS) if (!GUID.test(t)) fatal(`tenant id ${JSON.stringify(t)} is not a GUID`);
-const REQUIRED_SCOPE = process.env.GATE_REQUIRED_SCOPE || 'access_as_user';
-const ALLOWED_USERS = list(process.env.GATE_ALLOWED_USERS);
+if (TENANT !== 'consumers' && !GUID.test(TENANT)) fatal('MS365_MCP_TENANT_ID must be consumers or the tenant id GUID');
+// Token checks are Softeria's (0.166.0+): 401 when Entra rejects the assertion
+// at the On-Behalf-Of exchange, and the tenant/user allowlist
+// (MS365_MCP_OBO_ALLOWED_TENANTS / _USERS, set by start.sh). The gate's own
+// checks are retired; their settings abort startup so nobody relies on them.
+for (const retired of ['GATE_ALLOWED_TIDS', 'GATE_ALLOWED_USERS', 'GATE_REQUIRED_SCOPE']) {
+  if (process.env[retired] !== undefined) fatal(`${retired} is retired: use MS365_MCP_OBO_ALLOWED_TENANTS / MS365_MCP_OBO_ALLOWED_USERS (enforced by Softeria)`);
+}
+for (const t of list(process.env.MS365_MCP_OBO_ALLOWED_TENANTS)) if (!GUID.test(t)) fatal(`MS365_MCP_OBO_ALLOWED_TENANTS: ${JSON.stringify(t)} is not a GUID`);
+const REQUIRED_SCOPE = 'access_as_user';
 const GATE_KEY = process.env.MCP_GATE_KEY || '';
-const CLOCK_SKEW = 300;
 
 // ---- deployment policy (versioned, reviewed; env may not override) ---------
 // policy.json holds the image's fixed constraints: the default scope list,
@@ -127,7 +127,7 @@ for (const s of POLICY.scopes) if (!/^[A-Za-z][\w.]*$/.test(s)) fatal(`policy.js
 for (const t of [...POLICY.excludedTools, ...POLICY.hiddenTools]) if (!/^[a-z][a-z0-9-]*$/.test(t)) fatal(`policy.json: "${t}" is not a tool name`);
 // Superseded by get-upload-url, so hidden; registered upstream because the gate
 // uses them over loopback (graph-batch for read-mail-text).
-for (const t of ['add-mail-attachment', 'create-mail-attachment-upload-session', 'graph-batch']) {
+for (const t of ['add-mail-attachment', 'create-mail-attachment-upload-session', 'add-calendar-event-attachment', 'create-calendar-event-attachment-upload-session', 'graph-batch']) {
   if (!POLICY.hiddenTools.includes(t)) fatal(`policy.json hiddenTools must include "${t}"`);
 }
 for (const t of POLICY.hiddenTools) if (POLICY.excludedTools.includes(t)) fatal(`policy.json: "${t}" cannot be both hidden and excluded`);
@@ -283,38 +283,6 @@ setInterval(() => {
   for (const [ip, w] of rateWindows) if (now - w.windowStart >= 120_000) rateWindows.delete(ip);
 }, 60_000).unref();
 
-// ---- token pre-check ---------------------------------------------------------
-// Claims only. The signature is not checked here: Softeria exchanges the token
-// with Microsoft On-Behalf-Of the user, and Microsoft rejects an assertion that
-// is forged, expired or for another audience, so no Graph token and no data
-// result. (Softeria's maintainer prefers that proxies do not re-implement token
-// signature checks: key rotation, v1 tokens and national clouds; Softeria#696.)
-// This pre-check only turns away tokens that are plainly not for this relay
-// with a clean 401, and applies the tenant and user allowlists.
-
-function b64json(part) {
-  return JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
-}
-// Returns { ok: true, claims } or { ok: false, cat } — the category is logged,
-// never sent to the client.
-function precheck(token) {
-  const parts = token.split('.');
-  if (parts.length !== 3) return { ok: false, cat: 'token_malformed' };
-  let claims;
-  try { claims = b64json(parts[1]); } catch { return { ok: false, cat: 'token_malformed' }; }
-  if (!claims || typeof claims !== 'object') return { ok: false, cat: 'token_malformed' };
-  const now = Math.floor(Date.now() / 1000);
-  if (typeof claims.exp !== 'number' || claims.exp + CLOCK_SKEW < now) return { ok: false, cat: 'token_expired' };
-  if (typeof claims.nbf === 'number' && claims.nbf - CLOCK_SKEW > now) return { ok: false, cat: 'token_not_yet_valid' };
-  if (claims.ver !== '2.0') return { ok: false, cat: 'token_version' };
-  if (claims.aud !== CLIENT_ID) return { ok: false, cat: 'token_audience' };
-  if (!ALLOWED_TIDS.includes(claims.tid)) return { ok: false, cat: 'token_tenant' };
-  if (claims.iss !== `https://login.microsoftonline.com/${claims.tid}/v2.0`) return { ok: false, cat: 'token_issuer' };
-  if (!(typeof claims.scp === 'string' ? claims.scp : '').split(' ').includes(REQUIRED_SCOPE)) return { ok: false, cat: 'token_scope' };
-  if (ALLOWED_USERS.length && !ALLOWED_USERS.includes(claims.oid)) return { ok: false, cat: 'token_user' };
-  return { ok: true, claims };
-}
-
 // ---- proxying ----------------------------------------------------------------
 
 const PASS_HEADERS = ['authorization', 'content-type', 'content-length', 'accept', 'accept-encoding',
@@ -462,6 +430,9 @@ async function callUpstreamTool(authorization, name, args, ctx) {
   };
   let up;
   try { up = await upstreamRequest('POST', '/mcp', headers, call); } catch (e) { throw Object.assign(new Error('upstream'), { cat: e.message === 'timeout' ? 'upstream_timeout' : 'upstream_unavailable' }); }
+  // Softeria refused the caller (rejected token, allowlist): pass that answer on
+  // so the client re-authenticates, rather than reporting a tool failure.
+  if (up.status === 401 || up.status === 403) throw Object.assign(new Error('refused'), { cat: up.status === 401 ? 'token_rejected' : 'caller_refused', upstream: up });
   let r;
   try { r = parseRpc(up.body); } catch { r = null; }
   if (!r) throw Object.assign(new Error('upstream'), { cat: 'upstream_bad_response' });
@@ -488,9 +459,18 @@ async function handleReadMailText(ctx, rpc) {
     return rpcResult(ctx, rpc.id, out);
   } catch (e) {
     if (e instanceof mailText.ToolError) { logReq(ctx, 200, 'read_mail_text_refused'); return rpcResult(ctx, rpc.id, { error: e.message }, true); }
+    if (e.upstream) return relayRefusal(ctx, e);
     logReq(ctx, 200, e.cat || 'read_mail_text_failed');
     return rpcResult(ctx, rpc.id, { error: 'read_failed', category: e.cat || 'internal', hint: 'If you passed filter or search, check its syntax; otherwise retry.' }, true);
   }
+}
+
+// Softeria's 401/403 for the caller, relayed as is (status, challenge header, body).
+function relayRefusal(ctx, e) {
+  const up = e.upstream;
+  ctx.res.writeHead(up.status, { ...relayHeaders(up, ctx), 'content-length': up.body.length });
+  ctx.res.end(up.body);
+  return logReq(ctx, up.status, e.cat);
 }
 
 // Draft-only: an upload link for mail is minted only for a draft message.
@@ -500,7 +480,11 @@ async function checkUploadTarget(ctx, rpc) {
   if (!m) return null; // events, or a target Softeria itself refuses
   if (!MESSAGE_ID.test(m[1])) return { error: 'invalid_message_id' };
   let draft;
-  try { draft = await isDraft(ctx.req.headers.authorization, m[1], ctx); } catch (e) { logReq(ctx, 200, e.cat || 'graph_error'); return { error: 'message_lookup_failed' }; }
+  try { draft = await isDraft(ctx.req.headers.authorization, m[1], ctx); } catch (e) {
+    if (e.upstream) return { refusal: e };
+    logReq(ctx, 200, e.cat || 'graph_error');
+    return { error: 'message_lookup_failed' };
+  }
   return draft ? null : { error: 'not_a_draft', hint: 'Create a draft first (create-draft-email / create-*-draft) and pass its attachments collection as target.' };
 }
 
@@ -531,6 +515,7 @@ async function handleMcp(ctx) {
     }
     if (name === 'get-upload-url' && DRAFT_ONLY) {
       const refused = await checkUploadTarget(ctx, rpc);
+      if (refused && refused.refusal) return relayRefusal(ctx, refused.refusal);
       if (refused) { logReq(ctx, 200, 'upload_target_refused'); return rpcResult(ctx, rpc.id, refused, true); }
     }
   }
@@ -591,10 +576,8 @@ const server = http.createServer(async (req, res) => {
   if (rateLimited(ctx.ip)) return reject(ctx, 429, 'rate_limited', 'rate_limited', 'too many requests', { 'retry-after': '60' });
   if (GATE_KEY && !timingSafeEqual(req.headers['x-api-key'] || '', GATE_KEY)) return reject(ctx, 401, 'apikey', 'invalid_request', 'invalid request');
   const auth = req.headers.authorization || '';
-  if (!auth.startsWith('Bearer ')) return reject(ctx, 401, 'token_missing', 'invalid_token', 'invalid token');
-  const v = precheck(auth.slice(7));
-  if (!v.ok) return reject(ctx, 401, v.cat, 'invalid_token', 'invalid token');
-  ctx.user = v.claims.oid || v.claims.sub || 'unknown';
+  // A bearer must be present; validating it is Softeria's job at the OBO exchange.
+  if (!auth.startsWith('Bearer ') || auth.length < 20) return reject(ctx, 401, 'token_missing', 'invalid_token', 'invalid token');
 
   if (req.method === 'POST' && p === '/mcp') return handleMcp(ctx);
   forward(ctx);
@@ -609,7 +592,7 @@ server.listen(PORT, HOST, () => {
   if (INSECURE_TEST) logEvent({ level: 'warn', cat: 'config', msg: 'GATE_ALLOW_INSECURE_TEST is on: http origins accepted (tests only)' });
   logEvent({
     level: 'info', cat: 'listening', host: HOST, port: PORT, upstream: `${UPSTREAM_HOST}:${UPSTREAM_PORT}`, public: PUBLIC_URL, policy: POLICY.version, trustedIngress: TRUSTED_INGRESS,
-    aud: CLIENT_ID.slice(0, 8), tids: ALLOWED_TIDS.length, scope: REQUIRED_SCOPE, users: ALLOWED_USERS.length || 'any', apikey: !!GATE_KEY,
+    aud: CLIENT_ID.slice(0, 8), oboAllowedTenants: list(process.env.MS365_MCP_OBO_ALLOWED_TENANTS).length || 'any', oboAllowedUsers: list(process.env.MS365_MCP_OBO_ALLOWED_USERS).length || 'any', apikey: !!GATE_KEY,
     allowedScopes: ALLOWED_SCOPES, rateLimitPerMin: RATE_LIMIT_PER_MIN, draftOnly: DRAFT_ONLY, rejectToolNotifications: REJECT_TOOL_NOTIFICATIONS, readMailTextMaxChars: READ_MAIL_TEXT_MAX_CHARS,
   });
 });

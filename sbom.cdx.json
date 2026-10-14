@@ -2,10 +2,10 @@
   "$schema": "http://cyclonedx.org/schema/bom-1.5.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:cde962c1-50a5-4bc4-ae48-25eeb6fc6b7b",
+  "serialNumber": "urn:uuid:6168efb5-82fa-4f6d-8474-7c8b5b261192",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-10-10T16:41:49.818Z",
+    "timestamp": "2026-10-14T16:09:06.269Z",
     "lifecycles": [
       {
         "phase": "build"
@@ -19,13 +19,13 @@
       }
     ],
     "component": {
-      "bom-ref": "m365-claude-relay@1.1.0",
+      "bom-ref": "m365-claude-relay@1.3.0",
       "type": "library",
       "name": "pub",
-      "version": "1.1.0",
+      "version": "1.3.0",
       "scope": "required",
       "description": "Microsoft 365 for Claude custom connectors: Softeria ms-365-mcp-server in On-Behalf-Of mode behind a minimal, reviewed gate. Each user acts as themselves; scopes are configuration.",
-      "purl": "pkg:npm/m365-claude-relay@1.1.0",
+      "purl": "pkg:npm/m365-claude-relay@1.3.0",
       "properties": [
         {
           "name": "cdx:npm:package:path",
@@ -1330,13 +1330,13 @@
       ]
     },
     {
-      "bom-ref": "@softeria/ms-365-mcp-server@0.160.0",
+      "bom-ref": "@softeria/ms-365-mcp-server@0.166.0",
       "type": "library",
       "name": "@softeria/ms-365-mcp-server",
-      "version": "0.160.0",
+      "version": "0.166.0",
       "scope": "required",
       "description": " A Model Context Protocol (MCP) server for interacting with Microsoft 365 and Office services through the Graph API",
-      "purl": "pkg:npm/%40softeria/ms-365-mcp-server@0.160.0",
+      "purl": "pkg:npm/%40softeria/ms-365-mcp-server@0.166.0",
       "properties": [
         {
           "name": "cdx:npm:package:path",
@@ -1346,7 +1346,7 @@
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://registry.npmjs.org/@softeria/ms-365-mcp-server/-/ms-365-mcp-server-0.160.0.tgz"
+          "url": "https://registry.npmjs.org/@softeria/ms-365-mcp-server/-/ms-365-mcp-server-0.166.0.tgz"
         },
         {
           "type": "vcs",
@@ -1364,7 +1364,7 @@
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "b2497d5d182241f1320c7baea9759d2b1b6909734ecd5296d5db6510640525b58824bb8b3e588ef4b6c71d090449ceaa3ad087e9a26b6a1a033cbfbb5022a877"
+          "content": "d79c017bdc1b09bab22401cbda0c49af3e5f4bd6c6c2f2980781c70150789e122bf0f6952acbfb992767bfbd2eedb1a42cd6c0064d44fab3c0148194e4cddbee"
         }
       ],
       "licenses": [
@@ -9995,9 +9995,9 @@
   ],
   "dependencies": [
     {
-      "ref": "m365-claude-relay@1.1.0",
+      "ref": "m365-claude-relay@1.3.0",
       "dependsOn": [
-        "@softeria/ms-365-mcp-server@0.160.0"
+        "@softeria/ms-365-mcp-server@0.166.0"
       ]
     },
     {
@@ -10234,7 +10234,7 @@
       ]
     },
     {
-      "ref": "@softeria/ms-365-mcp-server@0.160.0",
+      "ref": "@softeria/ms-365-mcp-server@0.166.0",
       "dependsOn": [
         "@azure/msal-node@5.6.0",
         "@modelcontextprotocol/sdk@1.31.0",

@@ -1,6 +1,6 @@
 {
-  "version": "2026-10-10.1",
-  "description": "Fixed constraints baked into the M365 relay OBO image: the default Graph scope list (operators override it with MS365_MCP_ALLOWED_SCOPES; Softeria's --allowed-scopes derives the tool surface from the scopes at every start), the tools excluded because the relay provides a better replacement (download-bytes* \u2192 get-download-url), the attachment primitives hidden because Softeria's get-upload-url replaces them (graph-batch stays registered for the gate's own read-mail-text), and the safety switches (not weakenable through the environment). Nothing is withheld for any other reason: what an organisation does not want is Blocked in Claude's per-tool permissions.",
+  "version": "2026-10-14.1",
+  "description": "Fixed constraints baked into the M365 relay OBO image: the default Graph scope list (operators override it with MS365_MCP_ALLOWED_SCOPES; Softeria's --allowed-scopes derives the tool surface from the scopes at every start), the tools excluded because the relay provides a better replacement (download-bytes*, get-mail-attachment-content \u2192 get-download-url), the base64 attachment primitives for mail and events hidden because Softeria's get-upload-url replaces them (graph-batch stays registered for the gate's own read-mail-text), and the safety switches (not weakenable through the environment). Nothing is withheld for any other reason: what an organisation does not want is Blocked in Claude's per-tool permissions.",
   "scopes": [
     "User.Read",
     "Mail.ReadWrite",
@@ -12,11 +12,14 @@
   ],
   "excludedTools": [
     "download-bytes",
-    "download-bytes-to-file"
+    "download-bytes-to-file",
+    "get-mail-attachment-content"
   ],
   "hiddenTools": [
     "add-mail-attachment",
     "create-mail-attachment-upload-session",
+    "add-calendar-event-attachment",
+    "create-calendar-event-attachment-upload-session",
     "graph-batch"
   ],
   "draftOnly": true,

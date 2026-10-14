@@ -6,7 +6,7 @@ contacts and OneDrive through one small service you run. Sign-in is Microsoft's 
 On-Behalf-Of); the relay never holds a password, never stores a token on disk, and exposes exactly
 the tools your chosen Graph scopes cover. Nearly all of it is off-the-shelf:
 [Softeria/ms-365-mcp-server](https://github.com/Softeria/ms-365-mcp-server) (MIT), pinned
-`0.160.0`, in `--http --obo` mode behind a minimal, reviewed gate.
+`0.166.0`, in `--http --obo` mode behind a minimal, reviewed gate.
 
 Open source, MIT, best-effort support via GitHub issues. Image: `ghcr.io/rmdevpro/m365-claude-relay`.
 
@@ -24,7 +24,7 @@ your own scope list, and adds the hardening a public endpoint needs.
 |---|---|---|
 | Email attachments | Not supported: sending, forwarding and drafting with attachments are rejected; Claude can't attach files to drafts | Read any attachment as a real file; send, forward and draft with files up to 150 MB |
 | Calendar event attachments | Not supported | Supported (attendees receive the update) |
-| Tools | A fixed set chosen by Anthropic — about 40 listed in its security guide (7 read/search, the rest write) | 338 in the catalog; your scope list decides what is exposed (138 with the default scopes) |
+| Tools | A fixed set chosen by Anthropic — about 40 listed in its security guide (7 read/search, the rest write) | 354 in the catalog; your scope list decides what is exposed (138 with the default scopes) |
 | Areas | SharePoint/OneDrive search and file writes, Outlook mail and calendar, Teams chat and calendar | The same areas in depth, plus contacts, calendar sharing/delegation, mailbox rules, OneDrive file operations and Excel workbooks, To Do, OneNote, Planner, groups, rooms, presence, meeting transcripts/recordings, webhook subscriptions (some need additional or work-tenant scopes) |
 | Accounts | Work or school only; personal accounts refused | Work tenants and personal accounts |
 | Consent | Tenant-wide consent to Anthropic's app ("M365 MCP Server for Claude") by a Global Administrator | Your own app registration; users consent to exactly the scopes you list |
@@ -49,7 +49,7 @@ Sources (September 2026): [Microsoft 365 connector](https://claude.com/docs/conn
      -e MS365_MCP_ATTACHMENT_URL_BASE=https://relay.example.com \
      -e MS365_MCP_ATTACHMENT_URL_KEY=<32+ random hex> \
      -e MS365_MCP_ALLOWED_SCOPES="User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Contacts.ReadWrite MailboxSettings.ReadWrite Files.ReadWrite" \
-     ghcr.io/rmdevpro/m365-claude-relay:1.2.0
+     ghcr.io/rmdevpro/m365-claude-relay:1.3.0
    ```
 
    Work tenant: add `-e MS365_MCP_ORG_MODE=true`. Check `https://relay.example.com/health` — it
@@ -72,8 +72,8 @@ is removed from Claude's tool set entirely; connector tools are deferred-loaded,
 surface costs a list of names per conversation, not schemas. A tool whose service or permission
 the account lacks simply fails (Graph 403/404) — nothing runs that the scope does not allow.
 
-Softeria 0.160.0 ships 338 tools (`tools/list` in `--org-mode` with no filter). What today's policy
-(default scopes, policy `2026-10-10.1`) exposes, and what more scopes would add, on a **personal**
+Softeria 0.166.0 ships 354 tools (`tools/list` in `--org-mode` with no filter). What today's policy
+(default scopes, policy `2026-10-14.1`) exposes, and what more scopes would add, on a **personal**
 (outlook.com, `MS365_MCP_TENANT_ID=consumers`, no `--org-mode`) account:
 
 | Scope in the policy | Exposes (tools) |
@@ -87,10 +87,10 @@ Softeria 0.160.0 ships 338 tools (`tools/list` in `--org-mode` with no filter). 
 | `Files.ReadWrite` (+ `Files.Read`) | OneDrive browse/search/download, upload, copy/move/delete, **sharing links**, versions, thumbnails, and all Excel-workbook tools (42) |
 | *(no scope)* | `get-download-url`, `get-upload-url`, `graph-batch` (hidden), `parse-teams-url`, the six webhook `*-subscription` tools (10) |
 
-Softeria registers **140**; 3 of them are hidden (`add-mail-attachment`,
-`create-mail-attachment-upload-session`, `graph-batch`), and the gate adds `read-mail-text`, so a
-client sees **138** (shown in `/health` once listed). `download-bytes` is excluded because
-`get-download-url` replaces it. Full per-tool list with Softeria's descriptions: [docs/tools.md](docs/tools.md).
+Softeria registers **142**; 5 of them are hidden (the base64 and upload-session attachment
+primitives for mail and events, and `graph-batch`), and the gate adds `read-mail-text`, so a client
+sees **138** (shown in `/health` once listed). `download-bytes` and `get-mail-attachment-content`
+are excluded because `get-download-url` replaces them. Full per-tool list with Softeria's descriptions: [docs/tools.md](docs/tools.md).
 
 Scopes **not** in today's policy and what adding them would expose (personal accounts):
 `Tasks.ReadWrite` → To Do (12); `Notes.ReadWrite`/`Notes.Create` → OneNote (13);
@@ -129,11 +129,11 @@ The custom delta (`gate.js`, `mail-text.js`) exists only for what Softeria does 
 
 | Piece | Why custom | Retire when |
 |---|---|---|
-| Inbound relay-token pre-check: the claims only (exp/nbf, version, aud, tid, iss, scope, optional user allowlist), so a token not meant for this relay gets a clean 401. The signature is verified by Microsoft when Softeria exchanges the token On-Behalf-Of the user; a forged token gets no Graph token and no data. | Softeria returns a 500 instead of a 401 for a token it cannot exchange, and has no tenant/user allowlist | upstream Softeria#696 (401 and allowlist accepted by the maintainer; signature checks stay out of Softeria by design) |
+| *(retired in 1.3.0)* Token checks: Softeria 0.166.0 does them itself (our upstream PR #733): Entra verifies the assertion at the On-Behalf-Of exchange, Softeria answers 401 when it is rejected and enforces the tenant/user allowlist (`MS365_MCP_OBO_ALLOWED_TENANTS`/`_USERS`; `start.sh` defaults the tenants to the configured one). The gate only requires that a bearer is present. | — | done |
 | `read-mail-text`: a triage view of up to 20 messages with quoted history, signatures, footers, image placeholders and tracking links removed (links as `⟦link: domain⟧`). Pattern-based and lossy (`get-mail-message` has the exact body); hardened for hostile bodies (linear-time cleaning, 300,000-character input cap per message, unforgeable link markers); a result over the limit is refused whole with advice to narrow it | Softeria returns each body with all of that clutter (20 inbox messages ≈ 400,000 characters vs ≈ 33,000–42,000) | upstream PR Softeria#708 |
 | `/authorize`: the caller's `scope` is replaced by the relay scope before Softeria adds the configured Graph scopes | Softeria keeps whatever extra scopes the caller asks for; the relay's consent should be exactly the operator's list | — (relay posture) |
 | Draft-only check on `get-upload-url` (mail targets must be unsent drafts; events exempt) | Softeria attaches to any message the user can write | — (relay posture, policy switch) |
-| MCP glue: hide the three primitives `get-upload-url` supersedes and refuse the excluded tools; replace server instructions; refuse JSON-RPC batches | follows from the above | with the above |
+| MCP glue: hide the base64/upload-session attachment primitives `get-upload-url` supersedes and refuse the excluded tools; replace server instructions; refuse JSON-RPC batches | follows from the above | with the above |
 
 ## Public-service posture (gate)
 
@@ -142,19 +142,19 @@ The custom delta (`gate.js`, `mail-text.js`) exists only for what Softeria does 
 - One canonical client address is forwarded to Softeria, never the client's `X-Forwarded-For` chain. **Default (policy `trustedIngress: false`): the socket peer.** Only a policy that has proven the ingress strips/replaces forwarding headers and that the container is reachable solely through it may set `trustedIngress: true`, after which the last (ingress-appended) `X-Forwarded-For` entry is used; `MS365_MCP_TRUST_PROXY_HOPS` must then match the real ingress → gate → Softeria topology.
 - Exact open routes only (`/`, `/authorize`, `/token`, `/attachment` (GET/PUT; the single-use ticket is the credential), `/.well-known/*`); `/register` is never forwarded (DCR off). Everything else needs a valid relay token. Paths must already be in normal form (no percent-encoding, dot segments or doubled slashes) or the request is refused before routing.
 - No CORS (upstream CORS headers are stripped); `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` on every response. HSTS belongs at the TLS ingress (no preload).
-- Generic 401 bodies; the reason category is in the log only.
+- The gate answers 401 (with the resource-metadata challenge) only when no bearer is present; every token judgement is Softeria's and Entra's, and Softeria's 401/403 reach the client unchanged, including on the gate's own internal calls.
 - Config is a security boundary and is validated at startup: `MS365_MCP_PUBLIC_URL` (https origin) and `MS365_MCP_CLIENT_ID` required; `MS365_MCP_ATTACHMENT_URL_BASE` must be https and in the approved origins (`GATE_APPROVED_ORIGINS`, default = public origin + `login.microsoftonline.com`). The retired `GATE_JWKS_*` settings abort startup if still set.
 - **Scopes are the operator's configuration; the tool surface follows from them at every start** (`MS365_MCP_ALLOWED_SCOPES`, see "Scopes decide the tool surface"). The gate validates the list (Graph scope names; `Mail.ReadWrite` required for drafts and `read-mail-text`) and requires `MS365_MCP_EXTRA_SCOPES` (the consent list) to be the same list — `start.sh` sets both, so users always consent to exactly the scopes the surface was derived from. **`policy.json` holds the image's fixed constraints**: the default scope list, the two byte-return tools excluded because `get-download-url` replaces them, the three primitives hidden because `get-upload-url` replaces them, and the three safety switches. Both `start.sh` and `gate.js` read only the copy beside them (`GATE_POLICY_FILE` is refused); a malformed policy fails startup; `GATE_DRAFT_ONLY`, `GATE_REJECT_TOOL_NOTIFICATIONS` or `GATE_TRUSTED_INGRESS` set to anything other than the policy value aborts startup (they cannot be weakened from the environment).
 - Bounded operations: timeouts on loopback calls and client body reads; server header/request/keep-alive timeouts and a connection cap; `read-mail-text` results bounded by `GATE_READ_MAIL_TEXT_MAX_CHARS`. Upload streaming and its memory bound are Softeria's (one 3.75 MiB chunk at a time).
 - `/health` is green only when Softeria answers; both processes are supervised (`start.sh`).
 
-### Fixed constraints (committed `policy.json`, version `2026-10-10.1`)
+### Fixed constraints (committed `policy.json`, version `2026-10-14.1`)
 
 | Field | Value | Effect |
 |---|---|---|
-| `scopes` | `User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Contacts.ReadWrite MailboxSettings.ReadWrite Files.ReadWrite` | **default** for `MS365_MCP_ALLOWED_SCOPES`: Graph delegated scopes the user consents to at sign-in **and** the source of the tool surface — every Softeria tool whose required scopes these cover is exposed, except the `excludedTools` below and the three `hiddenTools` (140 registered in 0.160.0 on a personal tenant, incl. the 3 hidden; per-tool list in [docs/tools.md](docs/tools.md)) |
-| `excludedTools` | `download-bytes`, `download-bytes-to-file` | removed from the derived surface because the relay's `get-download-url` (one-time links) replaces them; base64-in-conversation fails for real files |
-| `hiddenTools` | `add-mail-attachment`, `create-mail-attachment-upload-session`, `graph-batch` | hidden from `tools/list`, refused on external `tools/call` (`get-upload-url` replaces them); `graph-batch` stays registered because `read-mail-text` uses it over loopback, as the user |
+| `scopes` | `User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Contacts.ReadWrite MailboxSettings.ReadWrite Files.ReadWrite` | **default** for `MS365_MCP_ALLOWED_SCOPES`: Graph delegated scopes the user consents to at sign-in **and** the source of the tool surface — every Softeria tool whose required scopes these cover is exposed, except the `excludedTools` below and the three `hiddenTools` (142 registered in 0.166.0 on a personal tenant, incl. the 5 hidden; per-tool list in [docs/tools.md](docs/tools.md)) |
+| `excludedTools` | `download-bytes`, `download-bytes-to-file`, `get-mail-attachment-content` | not registered, because the relay's `get-download-url` (one-time links) replaces them; base64-in-conversation fails for real files |
+| `hiddenTools` | `add-mail-attachment`, `create-mail-attachment-upload-session`, `add-calendar-event-attachment`, `create-calendar-event-attachment-upload-session`, `graph-batch` | hidden from `tools/list`, refused on external `tools/call` (`get-upload-url` replaces them); `graph-batch` stays registered because `read-mail-text` uses it over loopback, as the user |
 | `draftOnly` | `true` | `get-upload-url` for mail is passed to Softeria only when the target message is an unsent draft (checked as the user; events exempt) |
 | `rejectToolNotifications` | `true` | JSON-RPC notifications whose method is not `notifications/*` are refused |
 | `trustedIngress` | `false` | client address = socket peer (see above) |
@@ -166,7 +166,8 @@ The custom delta (`gate.js`, `mail-text.js`) exists only for what Softeria does 
 | `GATE_RATE_LIMIT_PER_MIN` | `0` (off) | per-client-IP limit on unauthenticated outcomes and on `/attachment`; `GATE_RATE_MAX_KEYS` bounds the map (10 000) |
 | `GATE_READ_MAIL_TEXT_MAX_CHARS` | `80000` | largest `read-mail-text` result; larger is refused whole with the biggest messages named |
 | `GATE_UPSTREAM_TIMEOUT_MS`, `GATE_BODY_IDLE_TIMEOUT_MS`, `GATE_HEADERS_TIMEOUT_MS`, `GATE_REQUEST_TIMEOUT_MS`, `GATE_MAX_CONNECTIONS`, `GATE_MCP_MAX_BODY_MB` | generous | bounds; values reviewed with the owner |
-| `GATE_ALLOWED_USERS`, `GATE_ALLOWED_TIDS`, `GATE_APPROVED_ORIGINS` | any / configured tenant / public + login | allowlists |
+| `MS365_MCP_OBO_ALLOWED_TENANTS`, `MS365_MCP_OBO_ALLOWED_USERS` | configured tenant / any | who may use the relay (tenant ids / user object ids), enforced by Softeria before the exchange (403 otherwise). The retired `GATE_ALLOWED_TIDS`/`GATE_ALLOWED_USERS` abort startup |
+| `GATE_APPROVED_ORIGINS` | public + login | origins attachment links may point at |
 
 ## How it works
 
@@ -221,14 +222,14 @@ Microsoft Graph **delegated** permissions matching the deployment's `MS365_MCP_A
 - `Dockerfile`: digest-pinned `node:22-slim`; `npm ci` from `package-lock.json`; `npm audit` fails the build on critical advisories; `sbom.cdx.json` is the CycloneDX SBOM; `NODE_OPTIONS` bounds the heap. Platform should run it read-only with no-new-privileges.
 - `.github/workflows/ci.yml`: `npm audit`, syntax checks, tests and a Docker build on every push; `release.yml`: on a `v*` tag, tests, then a multi-arch image to GHCR with cosign keyless signing, provenance and SBOM.
 - Update Softeria: bump the version in `package.json`; `npm install --package-lock-only`; regenerate the SBOM; `npm test`; rebuild; rerun your acceptance tests. Change the scopes: set `MS365_MCP_ALLOWED_SCOPES` in the deployment and restart (no rebuild). Change the fixed constraints: edit `policy.json` (bump `version`), `npm test`, review, redeploy.
-- Tests: `npm ci && npm test` (56) — composition tier (real `start.sh` + real `--obo` server with a runtime scope override; a recorder proves Softeria is started once, with the scopes in its environment and only the exclusions as `--enabled-tools`; `/authorize` through the real stack keeps the relay scope and adds the configured Graph scopes; `ENABLED_TOOLS` and a scope list without `Mail.ReadWrite` stop the start), unit tier against a mock upstream (config and policy-schema validation, policy drift, token pre-check matrix, forged-signature pass-through and user allowlist, protocol shapes, forged-XFF/rate limiting, glue, `/authorize` scope, `/attachment` route, draft-only on `get-upload-url`, `read-mail-text` through `graph-batch` as the caller and its size refusal, health, logs), `read-mail-text` cleaning cases (including linear time on hostile bodies and unforgeable link markers), and an integration tier against the real pinned Softeria on loopback (scope-derived surface of 138 with exclusions, hidden tools and `read-mail-text`; instructions, notifications, discovery, `/authorize` under `--obo`, `/register`, health). OAuth/OBO/ticket flows need a real Entra app: run the acceptance checks against your tenant.
+- Tests: `npm ci && npm test` (56) — composition tier (real `start.sh` + real `--obo` server with a runtime scope override; a recorder proves Softeria is started once, with the scopes in its environment and only the exclusions as `--enabled-tools`; `/authorize` through the real stack keeps the relay scope and adds the configured Graph scopes; `ENABLED_TOOLS` and a scope list without `Mail.ReadWrite` stop the start), unit tier against a mock upstream (config and policy-schema validation, policy drift, missing-bearer 401, pass-through of any bearer with Softeria's 401 relayed (including from `read-mail-text` and the draft check), protocol shapes, forged-XFF/rate limiting, glue, `/authorize` scope, `/attachment` route, draft-only on `get-upload-url`, `read-mail-text` through `graph-batch` as the caller and its size refusal, health, logs), `read-mail-text` cleaning cases (including linear time on hostile bodies and unforgeable link markers), and an integration tier against the real pinned Softeria on loopback (scope-derived surface of 138 with exclusions, hidden tools and `read-mail-text`; instructions, notifications, discovery, `/authorize` under `--obo`, `/register`, health). OAuth/OBO/ticket flows need a real Entra app: run the acceptance checks against your tenant.
 
 ## Support and contributing
 
 Best effort, no SLA: open a GitHub issue. Security reports: open a GitHub issue titled "security"
-with no exploit details. Upstream fixes are preferred over relay code: four former relay pieces are
-now Softeria features, and `read-mail-text` (Softeria#708) and the 401/allowlist part of the token
-pre-check (Softeria#696) are on their way upstream.
+with no exploit details. Upstream fixes are preferred over relay code: five former relay pieces are
+now Softeria features, the token checks (401 and allowlist, Softeria#733) are upstream since 0.166.0, and `read-mail-text`
+(Softeria#708) is in review.
 
 ## License
 

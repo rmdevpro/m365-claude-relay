@@ -28,7 +28,7 @@ function appCopyWithRecorder() {
   const rec = path.join(app, 'node_modules', '.bin', 'ms-365-mcp-server');
   fs.writeFileSync(rec, `#!/usr/bin/env node
 const e = process.env;
-require('fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify({ argv: process.argv.slice(2), allowed: e.MS365_MCP_ALLOWED_SCOPES, extra: e.MS365_MCP_EXTRA_SCOPES, tokenScope: e.MS365_MCP_TOKEN_SCOPE || null }) + '\\n');
+require('fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify({ argv: process.argv.slice(2), allowed: e.MS365_MCP_ALLOWED_SCOPES, extra: e.MS365_MCP_EXTRA_SCOPES, tenants: e.MS365_MCP_OBO_ALLOWED_TENANTS, users: e.MS365_MCP_OBO_ALLOWED_USERS || null, tokenScope: e.MS365_MCP_TOKEN_SCOPE || null }) + '\\n');
 const c = require('child_process').spawn(process.execPath, [${JSON.stringify(real)}, ...process.argv.slice(2)], { stdio: 'inherit' });
 c.on('exit', (code) => process.exit(code ?? 1));
 for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => c.kill(sig));
@@ -56,12 +56,14 @@ test('composition: start.sh starts Softeria --obo with the scopes in the environ
     const runs = fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
     assert.equal(runs.length, 1, 'one Softeria process: no derivation pass');
     const [run] = runs;
-    assert.deepEqual(run.argv, ['--http', `127.0.0.1:${up}`, '--obo', '--enabled-tools', '^(?!(?:download-bytes|download-bytes-to-file)$)', '--enable-attachment-urls']);
+    assert.deepEqual(run.argv, ['--http', `127.0.0.1:${up}`, '--obo', '--enabled-tools', '^(?!(?:download-bytes|download-bytes-to-file|get-mail-attachment-content)$)', '--enable-attachment-urls']);
     assert.equal(run.allowed, 'User.Read Mail.ReadWrite Mail.Send');
     assert.equal(run.extra, 'User.Read Mail.ReadWrite Mail.Send');
     assert.equal(run.tokenScope, null, 'no patch-era token scope variable');
+    assert.equal(run.tenants, '9188040d-6c67-4c5b-b112-36a304b66dad', 'default allowlist: the configured (consumer) tenant, enforced by Softeria');
+    assert.equal(run.users, null);
     const re = new RegExp(run.argv[4], 'i');
-    assert.ok(re.test('send-mail') && re.test('get-upload-url') && !re.test('download-bytes') && !re.test('download-bytes-to-file'));
+    assert.ok(re.test('send-mail') && re.test('get-upload-url') && !re.test('download-bytes') && !re.test('download-bytes-to-file') && !re.test('get-mail-attachment-content'));
     // The real --obo server, through the gate: the relay scope plus the configured Graph scopes.
     const a = await fetch(`http://127.0.0.1:${port}/authorize?response_type=code&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&state=abcdefghij&code_challenge=x&code_challenge_method=S256&scope=evil`, { redirect: 'manual' });
     assert.equal(a.status, 302);

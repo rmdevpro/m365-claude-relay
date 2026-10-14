@@ -1,6 +1,6 @@
 # Tool reference and recommended Claude permissions
 
-Policy `2026-10-10.1` (Softeria 0.160.0) is **scope-led**: users consent to `User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Contacts.ReadWrite MailboxSettings.ReadWrite Files.ReadWrite`; Softeria's `--allowed-scopes` derives the tool surface from those scopes at every container start (every tool whose required scopes are covered; 140 registered for the default list, 138 visible to Claude). Scopes are set by the operator (`MS365_MCP_ALLOWED_SCOPES`). Tools are not picked by hand; the only exceptions are tools the relay replaces with better ones: `download-bytes`/`download-bytes-to-file` (excluded; `get-download-url` replaces them) and three base64 attachment primitives (hidden; Softeria's `get-upload-url` replaces them). The gate adds one tool, `read-mail-text`.
+Policy `2026-10-14.1` (Softeria 0.166.0) is **scope-led**: users consent to `User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Contacts.ReadWrite MailboxSettings.ReadWrite Files.ReadWrite`; Softeria's `--allowed-scopes` derives the tool surface from those scopes at every container start (every tool whose required scopes are covered; 142 registered for the default list, 138 visible to Claude). Scopes are set by the operator (`MS365_MCP_ALLOWED_SCOPES`). Tools are not picked by hand; the only exceptions are tools the relay replaces with better ones: `download-bytes`/`download-bytes-to-file`/`get-mail-attachment-content` (excluded; `get-download-url` replaces them) and four base64/upload-session attachment primitives for mail and events (hidden; Softeria's `get-upload-url` replaces them). The gate adds one tool, `read-mail-text`.
 
 Columns: **Effect** = what the tool does (Softeria's own description, first sentence). **State**: `Allow` (exposed; Always allow in Claude), `Approve` (exposed; Needs approval in Claude), `Hidden` (registered for the relay's own use, never listed to Claude), `Off` (not exposed — the scope isn't granted, the tool is work-tenant only, or the relay replaces it with a better tool; the Why says which). 
 Principle: anything that leaves the mailbox (sends), destroys data, grants someone else access, or commits the user to something (calendar responses) = Approve. Reads, drafts and reversible edits inside the user's own data = Allow.
@@ -76,6 +76,7 @@ Principle: anything that leaves the mailbox (sends), destroys data, grants someo
 | update-mail-rule | Change writable properties on a messageRule object and save the changes | Approve | mail rules can silently forward, move or delete future mail |
 | update-mailbox-settings | Enable, configure, or disable one or more of the following settings as part of a user's mailboxSettings: When updating the preferred date or time format for a user, specify it in respectively, the short date or short tim | Approve | changes auto-replies / forwarding-relevant settings |
 | update-shared-mailbox-message | PATCH /users/{user-id}/messages/{message-id} | Off | work-tenant only; not available on personal accounts; tenant admin decision (needs admin-consented scopes) |
+| get-mail-attachment-content | Download one mail attachment's bytes (base64, or a file resource with blob output on) | Off | replaced by get-download-url (one-time link); base64 in the conversation fails for real files |
 
 ## Calendar
 
@@ -120,6 +121,8 @@ Principle: anything that leaves the mailbox (sends), destroys data, grants someo
 | update-my-calendar-permission | Update my calendar permission | Approve | grants another person access (calendar share/delegate, OneDrive sharing link) |
 | update-place | Updates properties of a place (room, room list, building, floor, section, desk, workspace) | Off | work-tenant only; not available on personal accounts; tenant admin decision (needs admin-consented scopes) |
 | update-specific-calendar-event | Update a specific calendar event | Allow | reversible edit inside the user's own data |
+| add-calendar-event-attachment | Attach a file under 3 MB to an event (base64 contentBytes) | Hidden | replaced by get-upload-url (one-time upload link) |
+| create-calendar-event-attachment-upload-session | Upload session for an event attachment of 3–150 MB | Hidden | replaced by get-upload-url (Softeria runs the upload session itself) |
 
 ## Contacts
 
@@ -284,6 +287,10 @@ Principle: anything that leaves the mailbox (sends), destroys data, grants someo
 | update-planner-task-details | CRITICAL: Requires If-Match header with ETag from get-planner-task-details (use includeHeaders=true) | Off | work-tenant only; not available on personal accounts; tenant admin decision (needs admin-consented scopes) |
 | update-todo-task | Updates a Microsoft To Do task | Off | needs a scope the policy does not grant (Tasks.ReadWrite) |
 | update-todo-task-list | Renames a Microsoft To Do task list | Off | needs a scope the policy does not grant (Tasks.ReadWrite) |
+| create-todo-checklist-item | Add a checklist item (step) to a To Do task | Off | needs a scope the policy does not grant (Tasks.ReadWrite) |
+| delete-todo-checklist-item | Delete a checklist item from a To Do task | Off | needs a scope the policy does not grant (Tasks.ReadWrite) |
+| list-todo-checklist-items | List a To Do task's checklist items | Off | needs a scope the policy does not grant (Tasks.Read) |
+| update-todo-checklist-item | Update a To Do task's checklist item | Off | needs a scope the policy does not grant (Tasks.ReadWrite) |
 
 ## Search
 
@@ -407,6 +414,15 @@ Principle: anything that leaves the mailbox (sends), destroys data, grants someo
 | update-group | Updates group properties | Off | work-tenant only; not available on personal accounts; tenant admin decision (needs admin-consented scopes) |
 | update-sharepoint-list-column | Updates a column definition | Off | work-tenant only; not available on personal accounts; tenant admin decision (needs admin-consented scopes) |
 | update-sharepoint-list-item | Updates fields on an existing list item | Off | work-tenant only; not available on personal accounts; tenant admin decision (needs admin-consented scopes) |
+| add-shared-mailbox-attachment | Attach a file to a shared-mailbox draft (base64) | Off | work-tenant only; not available on personal accounts; tenant admin decision (needs admin-consented scopes) |
+| create-shared-mailbox-child-folder | Create a child folder in a shared mailbox | Off | work-tenant only; not available on personal accounts; tenant admin decision (needs admin-consented scopes) |
+| create-shared-mailbox-folder | Create a folder in a shared mailbox | Off | work-tenant only; not available on personal accounts; tenant admin decision (needs admin-consented scopes) |
+| delete-shared-mailbox-attachment | Delete an attachment from a shared-mailbox message | Off | work-tenant only; not available on personal accounts; tenant admin decision (needs admin-consented scopes) |
+| get-shared-mailbox-attachment-content | Download a shared-mailbox attachment's bytes | Off | work-tenant only; not available on personal accounts; tenant admin decision (needs admin-consented scopes) |
+| get-shared-mailbox-message-mime | Raw MIME (.eml) of a shared-mailbox message | Off | work-tenant only; not available on personal accounts; tenant admin decision (needs admin-consented scopes) |
+| list-shared-mailbox-attachments | List a shared-mailbox message's attachments | Off | work-tenant only; not available on personal accounts; tenant admin decision (needs admin-consented scopes) |
+| list-shared-mailbox-child-folders | List child folders in a shared mailbox | Off | work-tenant only; not available on personal accounts; tenant admin decision (needs admin-consented scopes) |
+| list-shared-mailbox-folders | List folders in a shared mailbox | Off | work-tenant only; not available on personal accounts; tenant admin decision (needs admin-consented scopes) |
 
 ## Other
 
@@ -415,5 +431,5 @@ Principle: anything that leaves the mailbox (sends), destroys data, grants someo
 | list-trending-insights | Lists documents trending around the current user | Off | needs a scope the policy does not grant (Sites.Read.All) |
 
 ## Summary
-- 339 rows: 338 tools in Softeria 0.160.0 (`--org-mode`, no filter) + the gate's `read-mail-text`: Allow 96, Approve 42, Hidden 3, Off 198.
-- Registered with the default scopes (policy 2026-10-10.1, personal account): 140 (137 visible + 3 hidden); Claude sees 138 with `read-mail-text`.
+- 355 rows: 354 tools in Softeria 0.166.0 (`--org-mode`, no filter) + the gate's `read-mail-text`: Allow 96, Approve 42, Hidden 5, Off 212.
+- Registered with the default scopes (policy 2026-10-14.1, personal account): 142 (137 visible + 5 hidden); Claude sees 138 with `read-mail-text`.

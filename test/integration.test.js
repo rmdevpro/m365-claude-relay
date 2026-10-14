@@ -19,10 +19,10 @@ const H = (tok) => ({ authorization: `Bearer ${tok}`, 'content-type': 'applicati
 const SCOPES = POLICY.scopes.join(' ');
 const EXCLUDE = `^(?!(?:${POLICY.excludedTools.join('|')})$)`; // what start.sh passes
 const BIN = path.join(__dirname, '..', 'node_modules', '.bin', 'ms-365-mcp-server');
-// Default seven scopes, personal mode, Softeria 0.160.0, as a client sees it:
-// Softeria registers 140 (the 0.157.0 surface of 139 plus get-upload-url;
-// download-bytes excluded, download-bytes-to-file is stdio-only), minus the 3
-// hidden tools, plus read-mail-text = 138. Re-check on every Softeria bump.
+// Default seven scopes, personal mode, Softeria 0.166.0, as a client sees it:
+// Softeria registers 142 (download-bytes and get-mail-attachment-content
+// excluded, download-bytes-to-file is stdio-only), minus the 5 hidden tools,
+// plus read-mail-text = 138. Re-check on every Softeria bump.
 const EXPECTED_TOOLS = 138;
 
 let signer, gate, softeria, gateObo, softeriaObo;
@@ -85,8 +85,8 @@ test('real Softeria: tools/list = Softeria\'s scope-derived surface minus exclud
     assert.ok(names.includes(t), `${t} must be exposed (webhook tools are not excluded)`);
   }
   // The only exclusions are tools the relay replaces with a better one.
-  assert.deepEqual([...POLICY.excludedTools].sort(), ['download-bytes', 'download-bytes-to-file']);
-  for (const t of ['add-mail-attachment', 'create-mail-attachment-upload-session', 'graph-batch', 'get-attachment-upload-link']) assert.ok(!names.includes(t), `${t} is hidden/gone`);
+  assert.deepEqual([...POLICY.excludedTools].sort(), ['download-bytes', 'download-bytes-to-file', 'get-mail-attachment-content']);
+  for (const t of ['add-mail-attachment', 'create-mail-attachment-upload-session', 'add-calendar-event-attachment', 'create-calendar-event-attachment-upload-session', 'graph-batch', 'get-attachment-upload-link']) assert.ok(!names.includes(t), `${t} is hidden/gone`);
   for (const t of POLICY.excludedTools) assert.ok(!names.includes(t), `${t} is excluded`);
   // Needs a scope the policy does not grant, or a work tenant: never present.
   for (const t of ['list-todo-lists', 'list-onenote-notebooks', 'list-users', 'list-shared-mailbox-messages', 'list-chats', 'get-sharepoint-site']) {

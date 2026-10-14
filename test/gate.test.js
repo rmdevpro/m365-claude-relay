@@ -26,6 +26,8 @@ test('bad or unapproved config fails startup', async () => {
     { MS365_MCP_TENANT_ID: 'contoso' }, { GATE_DRAFT_ONLY: 'maybe' },
     { GATE_JWKS_URI: 'https://login.microsoftonline.com/common/discovery/v2.0/keys' },              // retired: no signature check in the gate
     { GATE_JWKS_MAX_AGE_SECONDS: '600' },
+    { GATE_ALLOWED_TIDS: '9188040d-6c67-4c5b-b112-36a304b66dad' }, { GATE_ALLOWED_USERS: 'x' }, { GATE_REQUIRED_SCOPE: 'x' }, // retired: Softeria enforces
+    { MS365_MCP_OBO_ALLOWED_TENANTS: 'contoso' },                                                  // tenant ids are GUIDs
     { GATE_ALLOW_INSECURE_TEST: '0', MS365_MCP_ATTACHMENT_URL_BASE: 'https://other.example' },      // unapproved attachment origin
     { MS365_MCP_ALLOWED_SCOPES: 'Mail.Read' }, { MS365_MCP_ALLOWED_SCOPES: 'Mail.ReadWrite bad scope!' },  // scopes: drafts need Mail.ReadWrite; bad name
     { MS365_MCP_EXTRA_SCOPES: 'Files.ReadWrite.All' },                                            // consent list must equal the allowed list
@@ -86,27 +88,16 @@ async function waitForLog(g, needle, ms = 2000) {
   return false;
 }
 
-// ---- token validation --------------------------------------------------------
-test('token pre-check matrix: all 401 with a generic body; reason only in the log', async () => {
-  const cases = {
-    token_audience: signer.mint({ aud: 'x' }),
-    token_expired: signer.mint({ exp: 1 }),
-    token_not_yet_valid: signer.mint({ nbf: Math.floor(Date.now() / 1000) + 3600 }),
-    token_tenant: signer.mint({ tid: 't2', iss: 'https://login.microsoftonline.com/t2/v2.0' }),
-    token_issuer: signer.mint({ iss: 'https://evil.example/v2.0' }),
-    token_scope: signer.mint({ scp: 'User.Read' }),
-    token_version: signer.mint({ ver: '1.0' }),
-    token_malformed: 'a.b',
-  };
-  for (const [cat, tok] of Object.entries(cases)) {
-    const r = await call(gate.port, '/mcp', { headers: H(tok), body: RPC('initialize', {}) });
-    assert.equal(r.status, 401, cat);
+// ---- tokens: Softeria's job; the gate only requires a bearer ---------------------
+test('no bearer (or an empty one): 401 with the resource-metadata challenge, nothing upstream', async () => {
+  up.seen.length = 0;
+  for (const headers of [{ 'content-type': 'application/json' }, { authorization: 'Basic abc', 'content-type': 'application/json' }, { authorization: 'Bearer x', 'content-type': 'application/json' }]) {
+    const r = await call(gate.port, '/mcp', { headers, body: RPC('initialize', {}) });
+    assert.equal(r.status, 401);
     assert.equal(r.json.error_description, 'invalid token');
     assert.match(r.headers.get('www-authenticate'), /resource_metadata="https:\/\/relay\.example\/\.well-known\/oauth-protected-resource"/);
-    assert.ok(await waitForLog(gate, `"cat":"${cat}"`), `log has ${cat}`);
   }
-  const none = await call(gate.port, '/mcp', { headers: { 'content-type': 'application/json' }, body: RPC('initialize', {}) });
-  assert.equal(none.status, 401);
+  assert.equal(up.seen.length, 0);
 });
 
 test('valid token reaches upstream with a canonical client address and allowlisted headers', async () => {
@@ -156,19 +147,25 @@ test('rate-key map is bounded', async () => {
   } finally { g.close(); }
 });
 
-test('the signature is not checked by the gate: a claims-valid token goes to Softeria, whose OBO exchange with Microsoft rejects a forgery', async () => {
+test('any bearer is passed to Softeria, whose OBO exchange with Microsoft judges it; its 401/403 reach the client', async () => {
   up.seen.length = 0;
-  const forged = signer.mint().slice(0, -4) + 'AAAA';
+  const forged = signer.mint({ aud: 'someone-else' }).slice(0, -4) + 'AAAA';
   const r = await call(gate.port, '/mcp', { headers: H(forged), body: RPC('ping', {}) });
   assert.equal(r.status, 200);
-  assert.equal(up.seen.length, 1);
   assert.equal(up.seen[0].headers.authorization, `Bearer ${forged}`);
-  const allowlisted = await startGate({ ...baseEnv(), GATE_ALLOWED_USERS: 'oid-ok' }, { policy: NEUTRAL });
+  // Refused by Softeria on a direct call, and on the gate's own internal calls.
+  const rejected = H(signer.mint({ oid: 'REJECT' }));
+  const direct = await call(gate.port, '/mcp', { headers: rejected, body: RPC('tools/list', {}) });
+  assert.equal(direct.status, 401);
+  assert.match(direct.headers.get('www-authenticate'), /invalid_token/);
+  const viaGate = await call(gate.port, '/mcp', { headers: rejected, body: RPC('tools/call', { name: 'read-mail-text', arguments: { folderId: 'inbox' } }) });
+  assert.equal(viaGate.status, 401, 'read-mail-text relays the refusal');
+  assert.match(viaGate.headers.get('www-authenticate'), /invalid_token/);
+  const g = await startGate(baseEnv(), { policy: { ...NEUTRAL, draftOnly: true } });
   try {
-    assert.equal((await call(allowlisted.port, '/mcp', { headers: H(signer.mint({ oid: 'oid-other' })), body: RPC('ping', {}) })).status, 401);
-    assert.ok(await waitForLog(allowlisted, '"cat":"token_user"'));
-    assert.equal((await call(allowlisted.port, '/mcp', { headers: H(signer.mint({ oid: 'oid-ok' })), body: RPC('ping', {}) })).status, 200);
-  } finally { allowlisted.close(); }
+    const draft = await call(g.port, '/mcp', { headers: rejected, body: RPC('tools/call', { name: 'get-upload-url', arguments: { target: '/me/messages/DRAFT-AAMkADAwATMwMAItYzhhMC1mMjIBLTAwAi0wMAoARgAAA/attachments', name: 'a.pdf' } }) });
+    assert.equal(draft.status, 401, 'the draft check relays the refusal');
+  } finally { g.close(); }
 });
 
 // ---- routes ------------------------------------------------------------------
@@ -247,7 +244,7 @@ test('initialize replaces instructions; tools/list hides superseded and excluded
   const list = await call(gate.port, '/mcp', { headers: H(signer.mint()), body: RPC('tools/list', {}) });
   assert.deepEqual(list.json.result.tools.map((t) => t.name), ['list-mail-messages', 'get-upload-url', 'read-mail-text']);
   up.seen.length = 0;
-  for (const name of ['add-mail-attachment', 'create-mail-attachment-upload-session', 'graph-batch', 'download-bytes', 'download-bytes-to-file']) {
+  for (const name of ['add-mail-attachment', 'create-mail-attachment-upload-session', 'add-calendar-event-attachment', 'create-calendar-event-attachment-upload-session', 'graph-batch', 'download-bytes', 'download-bytes-to-file', 'get-mail-attachment-content']) {
     const r = await call(gate.port, '/mcp', { headers: H(signer.mint()), body: RPC('tools/call', { name, arguments: {} }) });
     assert.equal(r.json.result.isError, true, name);
     assert.equal(JSON.parse(r.json.result.content[0].text).error, 'tool_not_available');

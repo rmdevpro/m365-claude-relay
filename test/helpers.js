@@ -52,13 +52,18 @@ async function startUpstream(opts = {}) {
       const base = { 'content-type': 'application/json', 'access-control-allow-origin': 'http://localhost:3000' };
       if (req.url === '/') { res.writeHead(200, base); return res.end('Microsoft 365 MCP Server is running'); }
       if (req.url.startsWith('/authorize')) { res.writeHead(302, { ...base, location: 'https://login.microsoftonline.com/x?' + req.url.split('?')[1] }); return res.end(); }
+      if (req.url === '/mcp' && /"oid":"REJECT"/.test(Buffer.from(String(req.headers.authorization || '').split('.')[1] || '', 'base64url').toString())) {
+        // Softeria's answer when Entra rejects the assertion at the OBO exchange.
+        res.writeHead(401, { 'content-type': 'application/json', 'www-authenticate': 'Bearer resource_metadata="https://relay.example/.well-known/oauth-protected-resource", error="invalid_token"' });
+        return res.end('{"error":"invalid_token"}');
+      }
       if (req.url === '/mcp') {
         let rpc; try { rpc = JSON.parse(body); } catch { rpc = null; }
         const msgs = Array.isArray(rpc) ? rpc : [rpc];
         const out = msgs.map((m) => {
           if (!m || !m.method) return { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'bad' } };
           if (m.method === 'initialize') return { jsonrpc: '2.0', id: m.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'mock', version: '0' }, instructions: 'UPSTREAM DEFAULT' } };
-          if (m.method === 'tools/list') return { jsonrpc: '2.0', id: m.id, result: { tools: ['list-mail-messages', 'add-mail-attachment', 'create-mail-attachment-upload-session', 'graph-batch', 'download-bytes', 'get-upload-url'].map((name) => ({ name, inputSchema: { type: 'object' } })) } };
+          if (m.method === 'tools/list') return { jsonrpc: '2.0', id: m.id, result: { tools: ['list-mail-messages', 'add-mail-attachment', 'create-mail-attachment-upload-session', 'add-calendar-event-attachment', 'create-calendar-event-attachment-upload-session', 'graph-batch', 'download-bytes', 'get-mail-attachment-content', 'get-upload-url'].map((name) => ({ name, inputSchema: { type: 'object' } })) } };
           if (m.method === 'tools/call') {
             const name = m.params && m.params.name;
             const args = (m.params && m.params.arguments) || {};
