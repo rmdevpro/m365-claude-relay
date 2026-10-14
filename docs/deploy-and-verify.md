@@ -12,7 +12,7 @@ anyone relies on it. Every check here was run against the public demo instance f
 | Claude org owner (Team/Enterprise) | Adds the custom connector, sets tool permissions, and allows the relay host for code execution. |
 | A tester | Has a Claude seat and a mailbox in the tenant. Use test data, not client data, for the first run. |
 
-Decide the scope list first. **Mail only** is `User.Read Mail.ReadWrite Mail.Send` (about 47 tools:
+Decide the scope list first. **Mail only** is `User.Read Mail.ReadWrite Mail.Send` (45 tools in release 1.4.0:
 read, triage, draft, send, attachments). Add `Calendars.ReadWrite`, `Contacts.ReadWrite`,
 `Files.ReadWrite` and so on later: change the variable, restart, and admin-consent the new permission.
 
@@ -89,7 +89,7 @@ Run each in a new chat and keep the answers as the test record. Approve each too
 
 | # | Ask Claude to… | Pass when |
 |---|---|---|
-| 1 | Refresh the connector (connector ⋮ > Refresh tools list) | "Tools list refreshed"; the tool count matches the scopes (138 for the default seven, about 47 for mail only) |
+| 1 | Refresh the connector (connector ⋮ > Refresh tools list) | "Tools list refreshed"; the tool count matches the scopes (138 for the default seven scopes, 45 for mail only, in release 1.4.0) |
 | 2 | "Use get-current-user" | It returns the tester's own name and address |
 | 3 | "Use read-mail-text on my inbox, top 5" | Five messages with clean text, no quoted history or long tracking links |
 | 4 | "Use read-mail-text with these two message ids" (from a listing) | The same text as in step 3 |
