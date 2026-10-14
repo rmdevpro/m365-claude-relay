@@ -14,10 +14,9 @@
 #   MS365_MCP_OBO_ALLOWED_TENANTS / _USERS           who may use the relay (tenant ids / user object ids);
 #                                                    default: the configured tenant, any user
 #   MS365_MCP_ATTACHMENT_URL_BASE/_KEY/_TTL_S        OTS attachment download/upload links (KEY is SECRET)
-#   GATE_*                                           gate limits/switches (see gate.js)
-# Fixed in the image (policy.json): tools excluded because the relay replaces
-# them (download-bytes* → get-download-url), tools hidden because get-upload-url
-# replaces them, safety switches.
+#   GATE_READ_MAIL_TEXT_MAX_CHARS                    largest read-mail-text result (default 80000)
+# Fixed in the image (policy.json): the default scopes and the tools excluded
+# because the relay replaces them with better ones.
 set -euo pipefail
 
 : "${MS365_MCP_LOG_DIR:=/dev/shm/ms365-logs}"
@@ -25,7 +24,6 @@ set -euo pipefail
 mkdir -p "$MS365_MCP_LOG_DIR"
 export MS365_MCP_LOG_DIR
 
-if [ -n "${GATE_POLICY_FILE:-}" ]; then echo "[start] GATE_POLICY_FILE is not supported; policy.json in the image holds the fixed constraints" >&2; exit 1; fi
 # Softeria reads ENABLED_TOOLS from the environment and it would override the
 # exclusions below, so it is refused.
 if [ -n "${ENABLED_TOOLS:-}" ]; then echo "[start] ENABLED_TOOLS is not supported; the tool surface follows MS365_MCP_ALLOWED_SCOPES" >&2; exit 1; fi
@@ -46,8 +44,8 @@ TENANT_ID="${MS365_MCP_TENANT_ID:-consumers}"
 if [ "$TENANT_ID" = consumers ]; then DEFAULT_TID="$CONSUMERS_TID"; else DEFAULT_TID="$TENANT_ID"; fi
 export MS365_MCP_OBO_ALLOWED_TENANTS="${MS365_MCP_OBO_ALLOWED_TENANTS:-$DEFAULT_TID}"
 # Excluded tools (replaced by better ones) are not registered at all: an
-# anchored negative lookahead over the policy's names (validated as
-# [a-z][a-z0-9-]* by the gate at start, so no regex metacharacters).
+# anchored negative lookahead over the policy's names (checked just below to be
+# plain [a-z0-9-] names, so no regex metacharacters).
 EXCLUDED="$(policy excludedTools)"
 for t in $EXCLUDED; do case "$t" in *[!a-z0-9-]*|'') echo "[start] bad excluded tool name: $t" >&2; exit 1;; esac; done
 ENABLED_ARGS=()

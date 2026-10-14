@@ -1,35 +1,26 @@
-// Test helpers: a token minter (the gate checks claims, not signatures), a
-// mock Softeria upstream and a gate launcher. Loopback only; no real
-// credentials. GATE_ALLOW_INSECURE_TEST=1 lets the gate accept http loopback
-// origins; deployments never set it.
+// Test helpers: a token minter, a mock Softeria upstream and a gate launcher.
+// Loopback only; no real credentials. The gate never judges tokens, so the
+// mock plays Softeria's part: a bearer whose payload has oid "REJECT" gets
+// Softeria's 401, as when Entra refuses the assertion at the OBO exchange.
 const http = require('http');
+const net = require('net');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 const path = require('path');
+const fs = require('fs');
 
 const CLIENT_ID = '11111111-2222-3333-4444-555555555555';
-const CONSUMERS_TID = '9188040d-6c67-4c5b-b112-36a304b66dad';
+const POLICY = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'policy.json'), 'utf8'));
 
-function makeSigner() {
-  const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
-  const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'k1', use: 'sig' };
+function mint(claims = {}) {
   const b = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
-  function mint(over = {}, hdr = {}) {
-    const now = Math.floor(Date.now() / 1000);
-    const c = { ver: '2.0', aud: CLIENT_ID, tid: CONSUMERS_TID, iss: `https://login.microsoftonline.com/${CONSUMERS_TID}/v2.0`,
-      scp: 'access_as_user', oid: 'oid-1', exp: now + 3600, nbf: now - 10, ...over };
-    const h = { alg: 'RS256', kid: 'k1', ...hdr };
-    const d = `${b(h)}.${b(c)}`;
-    return d + '.' + crypto.sign('RSA-SHA256', Buffer.from(d), privateKey).toString('base64url');
-  }
-  return { jwk, mint };
+  return `${b({ alg: 'RS256', typ: 'JWT' })}.${b({ aud: CLIENT_ID, exp: Math.floor(Date.now() / 1000) + 3600, oid: 'oid-1', ...claims })}.sig`;
 }
 
-// A port the OS reports free right now (bound to 0, then released). Fixed random
-// ranges collide with ephemeral ports other suites' servers get from the OS.
+// A port the OS reports free right now (bound to 0, then released).
 function freePort() {
   return new Promise((resolve, reject) => {
-    const srv = require('net').createServer();
+    const srv = net.createServer();
     srv.on('error', reject);
     srv.listen(0, '127.0.0.1', () => { const { port } = srv.address(); srv.close(() => resolve(port)); });
   });
@@ -39,8 +30,12 @@ function listen(server) {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 }
 
+function claimsOf(req) {
+  try { return JSON.parse(Buffer.from(String(req.headers.authorization || '').split('.')[1] || '', 'base64url').toString()); } catch { return {}; }
+}
 
-// Mock upstream: records every request; answers MCP methods; serves "/".
+// Mock Softeria: records every request; answers MCP like the real server (SSE
+// when opts.sse), plus a plain route for pass-through checks.
 async function startUpstream(opts = {}) {
   const seen = [];
   const s = http.createServer((req, res) => {
@@ -49,74 +44,52 @@ async function startUpstream(opts = {}) {
     req.on('end', () => {
       const body = Buffer.concat(chunks).toString('utf8');
       seen.push({ method: req.method, url: req.url, headers: req.headers, body });
-      const base = { 'content-type': 'application/json', 'access-control-allow-origin': 'http://localhost:3000' };
-      if (req.url === '/') { res.writeHead(200, base); return res.end('Microsoft 365 MCP Server is running'); }
-      if (req.url.startsWith('/authorize')) { res.writeHead(302, { ...base, location: 'https://login.microsoftonline.com/x?' + req.url.split('?')[1] }); return res.end(); }
-      if (req.url === '/mcp' && /"oid":"REJECT"/.test(Buffer.from(String(req.headers.authorization || '').split('.')[1] || '', 'base64url').toString())) {
-        // Softeria's answer when Entra rejects the assertion at the OBO exchange.
+      if (req.url !== '/mcp') {
+        res.writeHead(201, { 'content-type': 'text/plain', 'x-upstream': 'yes' });
+        return res.end(`echo ${req.method} ${req.url} ${body}`);
+      }
+      if (!req.headers.authorization) {
         res.writeHead(401, { 'content-type': 'application/json', 'www-authenticate': 'Bearer resource_metadata="https://relay.example/.well-known/oauth-protected-resource", error="invalid_token"' });
         return res.end('{"error":"invalid_token"}');
       }
-      if (req.url === '/mcp') {
-        let rpc; try { rpc = JSON.parse(body); } catch { rpc = null; }
-        const msgs = Array.isArray(rpc) ? rpc : [rpc];
-        const out = msgs.map((m) => {
-          if (!m || !m.method) return { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'bad' } };
-          if (m.method === 'initialize') return { jsonrpc: '2.0', id: m.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'mock', version: '0' }, instructions: 'UPSTREAM DEFAULT' } };
-          if (m.method === 'tools/list') return { jsonrpc: '2.0', id: m.id, result: { tools: ['list-mail-messages', 'add-mail-attachment', 'create-mail-attachment-upload-session', 'add-calendar-event-attachment', 'create-calendar-event-attachment-upload-session', 'graph-batch', 'download-bytes', 'get-mail-attachment-content', 'get-upload-url'].map((name) => ({ name, inputSchema: { type: 'object' } })) } };
-          if (m.method === 'tools/call') {
-            const name = m.params && m.params.name;
-            const args = (m.params && m.params.arguments) || {};
-            const text = (o) => ({ jsonrpc: '2.0', id: m.id, result: { content: [{ type: 'text', text: JSON.stringify(o) }] } });
-            if (name === 'get-mail-message') return text({ id: args.messageId, isDraft: String(args.messageId).startsWith('DRAFT') });
-            if (name === 'graph-batch') {
-              // Messages: /me/messages/{id} -> a text body; unknown ids 404. Folders: a list.
-              const msg = (id) => ({ id, subject: `S-${id}`, body: { contentType: 'text', content: `Body ${id}\n\nOn Mon, P wrote:\n> old` }, from: { emailAddress: { address: 'p@example.com' } } });
-              return text({ responses: args.body.requests.map((rq) => {
-                const mm = /^\/me\/messages\/([^?]+)\?/.exec(rq.url);
-                if (mm) return decodeURIComponent(mm[1]).startsWith('MISSING') ? { id: rq.id, status: 404, body: { error: { code: 'ErrorItemNotFound' } } } : { id: rq.id, status: 200, body: msg(decodeURIComponent(mm[1])) };
-                return { id: rq.id, status: 400, body: { error: { code: 'BadRequest' } } };
-              }) });
-            }
-            if (name === 'list-mail-folder-messages') {
-              if (args.filter === 'bad') return { jsonrpc: '2.0', id: m.id, result: { content: [{ type: 'text', text: 'BadRequest' }], isError: true } };
-              const msg = (id) => ({ id, subject: `S-${id}`, body: { contentType: 'text', content: `Body ${id}` }, from: { emailAddress: { address: 'p@example.com' } } });
-              return text({ value: [msg('F1'), msg('F2')] });
-            }
-            return text({ called: name });
-          }
-          return { jsonrpc: '2.0', id: m.id, result: {} };
-        });
-        res.writeHead(200, base);
-        return res.end(JSON.stringify(Array.isArray(rpc) ? out : out[0]));
+      if (claimsOf(req).oid === 'REJECT') {
+        res.writeHead(401, { 'content-type': 'application/json', 'www-authenticate': 'Bearer error="invalid_token"' });
+        return res.end('{"error":"invalid_token","error_description":"The access token was rejected; sign in again"}');
       }
-      res.writeHead(200, base); res.end('{}');
+      let rpc; try { rpc = JSON.parse(body); } catch { rpc = null; }
+      const reply = (result) => {
+        const msg = JSON.stringify({ jsonrpc: '2.0', id: rpc && rpc.id, result });
+        res.writeHead(200, { 'content-type': opts.sse ? 'text/event-stream' : 'application/json', 'mcp-session-id': 'S1' });
+        res.end(opts.sse ? `event: message\ndata: ${msg}\n\n` : msg);
+      };
+      const text = (o, isError) => reply({ content: [{ type: 'text', text: typeof o === 'string' ? o : JSON.stringify(o) }], ...(isError ? { isError: true } : {}) });
+      if (!rpc || Array.isArray(rpc)) return reply({ batch: true });
+      if (rpc.method === 'tools/list') return reply({ tools: [{ name: 'list-mail-messages', inputSchema: { type: 'object' } }, { name: 'get-upload-url', inputSchema: { type: 'object' } }] });
+      if (rpc.method === 'tools/call') {
+        const { name, arguments: args = {} } = rpc.params;
+        const msg = (id) => ({ id, subject: `S-${id}`, body: { contentType: 'text', content: `Body ${id}\n\nOn Mon, P wrote:\n> old` }, from: { emailAddress: { address: 'p@example.com' } } });
+        if (name === 'get-mail-message') {
+          if (String(args.messageId).startsWith('MISSING')) return text('Microsoft Graph API error: 404 Not Found - {"error":{"code":"ErrorItemNotFound","message":"x"}}', true);
+          return text(msg(args.messageId));
+        }
+        if (name === 'list-mail-folder-messages') {
+          if (args.filter === 'bad') return text('Microsoft Graph API error: 400 Bad Request - {"error":{"code":"BadRequest","message":"Invalid filter clause"}}', true);
+          const n = Math.min(args.top || 2, opts.bigBodies ? 20 : 2);
+          return text({ value: Array.from({ length: n }, (_, i) => (opts.bigBodies ? { ...msg(`F${i}`), body: { content: 'x'.repeat(10000) } } : msg(`F${i + 1}`))) });
+        }
+        return text({ called: name });
+      }
+      return reply({ method: rpc.method });
     });
   });
   const port = await listen(s);
   return { port, seen, close: () => s.close() };
 }
 
-const fs = require('fs');
-const os = require('os');
-const POLICY = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'policy.json'), 'utf8'));
-
-// `policy` = overrides merged into the committed policy; `rawPolicy` = used
-// verbatim (schema tests). Either way the gate runs as a COPY of gate.js in a
-// temp dir next to that policy.json: there is no runtime mechanism to point a
-// deployed gate at another policy, and the tests must not need one.
-async function startGate(env, { expectExit, policy, rawPolicy } = {}) {
-  let gatePath = path.join(__dirname, '..', 'gate.js');
-  if (policy || rawPolicy) {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-copy-'));
-    fs.copyFileSync(gatePath, path.join(dir, 'gate.js'));
-    fs.copyFileSync(path.join(__dirname, '..', 'mail-text.js'), path.join(dir, 'mail-text.js'));
-    fs.writeFileSync(path.join(dir, 'policy.json'), typeof rawPolicy === 'string' ? rawPolicy : JSON.stringify(rawPolicy || { ...POLICY, ...policy }));
-    gatePath = path.join(dir, 'gate.js');
-  }
+async function startGate(env, { expectExit } = {}) {
   const port = await freePort();
-  const child = spawn(process.execPath, [gatePath], {
-    env: { PATH: process.env.PATH, PORT: String(port), HOST: '127.0.0.1', MS365_MCP_PUBLIC_URL: 'https://relay.example', MS365_MCP_CLIENT_ID: CLIENT_ID, GATE_ALLOW_INSECURE_TEST: '1', ...env },
+  const child = spawn(process.execPath, [path.join(__dirname, '..', 'gate.js')], {
+    env: { PATH: process.env.PATH, PORT: String(port), HOST: '127.0.0.1', ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let out = '';
@@ -134,11 +107,11 @@ async function startGate(env, { expectExit, policy, rawPolicy } = {}) {
   return { port, child, output: () => out, close: () => child.kill() };
 }
 
-async function call(port, path, { method = 'POST', headers = {}, body } = {}) {
-  const res = await fetch(`http://127.0.0.1:${port}${path}`, { method, headers, body, redirect: 'manual' });
+async function call(port, p, { method = 'POST', headers = {}, body } = {}) {
+  const res = await fetch(`http://127.0.0.1:${port}${p}`, { method, headers, body, redirect: 'manual' });
   const text = await res.text();
   let json = null; try { json = JSON.parse(text); } catch { /* not json */ }
   return { status: res.status, headers: res.headers, text, json };
 }
 
-module.exports = { freePort, CLIENT_ID, CONSUMERS_TID, POLICY, makeSigner, startUpstream, startGate, call };
+module.exports = { CLIENT_ID, POLICY, mint, freePort, startUpstream, startGate, call, crypto };

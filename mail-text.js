@@ -1,6 +1,7 @@
 // read-mail-text (Infra #96): the text of mail messages with the clutter removed.
 //
-// Bodies come from Softeria as plain text (its default body format), then
+// Bodies come from Softeria's own mail tools as plain text (its default body
+// format), then
 // cleanText() removes quoted reply history, the "-- " signature, mobile
 // sign-offs, a trailing footer block and image placeholders, and shortens links
 // to ⟦link: domain⟧. Cleaning is deterministic and pattern-based: it removes
@@ -18,7 +19,6 @@ const MAX_IDS = 20;
 const MAX_TOP = 20;
 const MAX_INPUT_CHARS = 300_000;
 const SELECT = 'id,subject,from,toRecipients,ccRecipients,receivedDateTime,hasAttachments,body';
-const PREFER_TEXT = 'outlook.body-content-type="text"';
 
 const TOOL_NAME = 'read-mail-text';
 const TOOL_DEF = {
@@ -225,30 +225,31 @@ function toEntry(m, a) {
   };
 }
 
-function graphError(status, body) {
-  const e = body && body.error;
-  return e ? `${e.code || status}: ${e.message || ''}`.trim() : `HTTP ${status}`;
+
+// A Softeria tool error ("Microsoft Graph API error: 404 Not Found - {...}") as
+// a short per-message error.
+function toolError(e) {
+  const text = String((e && e.message) || e);
+  if (/ErrorItemNotFound|404 Not Found/.test(text)) return 'not found';
+  const m = /\\?"code\\?":\\?"(\w+)\\?",\\?"message\\?":\\?"([^"\\]{0,160})/.exec(text);
+  return m ? `${m[1]}: ${m[2]}` : text.slice(0, 200);
 }
 
 // callTool(name, args) -> the parsed JSON result of a Softeria tool, run as the
-// caller; it throws on a tool error. Folder reads go through
-// list-mail-folder-messages so Softeria's own $search normalisation applies (and
-// bodies arrive as text, its default); ids through one graph-batch.
+// caller; it throws on a tool error. Only Softeria's ordinary mail tools are
+// used: get-mail-message per id (in parallel) and list-mail-folder-messages for
+// a folder, so Softeria's own text bodies and $search normalisation apply and
+// no generic Graph tool is needed.
 async function readMailText(args, callTool, maxResponseChars) {
   const a = validate(args);
   let messages;
   if (a.messageIds) {
-    const requests = a.messageIds.map((id, i) => ({
-      id: String(i), method: 'GET', url: `/me/messages/${encodeURIComponent(id)}?$select=${SELECT}`, headers: { Prefer: PREFER_TEXT },
+    messages = await Promise.all(a.messageIds.map(async (id) => {
+      try { return (await callTool('get-mail-message', { messageId: id, select: SELECT })) || {}; } catch (e) {
+        if (e && e.refusal) throw e; // the caller was refused (token/allowlist): not a per-message error
+        return { id, error: toolError(e) };
+      }
     }));
-    const r = await callTool('graph-batch', { body: { requests } });
-    const byId = new Map(((r && r.responses) || []).map((x) => [String(x.id), x]));
-    messages = a.messageIds.map((id, i) => {
-      const x = byId.get(String(i));
-      if (!x) return { id, error: 'no response' };
-      if (x.status !== 200) return { id, error: x.status === 404 ? 'not found' : graphError(x.status, x.body) };
-      return x.body || {};
-    });
   } else {
     const q = { mailFolderId: a.folderId, top: a.top || MAX_TOP, select: SELECT };
     if (a.filter !== undefined) q.filter = a.filter;

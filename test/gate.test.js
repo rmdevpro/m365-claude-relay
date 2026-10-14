@@ -1,365 +1,139 @@
+// The gate is a pass-through that adds read-mail-text; everything else is
+// Softeria's. These tests pin both halves: what passes through untouched, and
+// what the one added tool does.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { CLIENT_ID, POLICY, makeSigner, startUpstream, startGate, call } = require('./helpers');
+const { mint, startUpstream, startGate, call } = require('./helpers');
 
 const RPC = (method, params, id = 1) => JSON.stringify({ jsonrpc: '2.0', id, method, params });
-const H = (tok) => ({ authorization: `Bearer ${tok}`, 'content-type': 'application/json', accept: 'application/json' });
-const DRAFT = 'DRAFT-AAMkADAwATMwMAItYzhhMC1mMjIBLTAwAi0wMAoARgAAA';
-const SENT = 'SENT-AAMkADAwATMwMAItYzhhMC1mMjIBLTAwAi0wMAoARgAAA';
+const H = (tok) => ({ authorization: `Bearer ${tok}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' });
+const READ = (args, id = 1) => RPC('tools/call', { name: 'read-mail-text', arguments: args }, id);
 
-let signer, up, gate;
-const baseEnv = () => ({ UPSTREAM_PORT: String(up.port) });
-const NEUTRAL = { draftOnly: false, rejectToolNotifications: false }; // tests that exercise the switches turn them on explicitly
-
+let up, gate;
 test.before(async () => {
-  signer = makeSigner();
   up = await startUpstream();
-  gate = await startGate(baseEnv(), { policy: NEUTRAL });
+  gate = await startGate({ UPSTREAM_PORT: String(up.port) });
 });
 test.after(() => { gate.close(); up.close(); });
 
-// ---- configuration validation ------------------------------------------------
-test('bad or unapproved config fails startup', async () => {
-  for (const env of [
-    { GATE_READ_MAIL_TEXT_MAX_CHARS: 'not-a-number' }, { GATE_READ_MAIL_TEXT_MAX_CHARS: '10' }, { GATE_RATE_LIMIT_PER_MIN: '-1' },
-    { MS365_MCP_PUBLIC_URL: 'http://relay.example', GATE_ALLOW_INSECURE_TEST: '0' }, { MS365_MCP_PUBLIC_URL: '' }, { MS365_MCP_CLIENT_ID: 'nope' },
-    { MS365_MCP_TENANT_ID: 'contoso' }, { GATE_DRAFT_ONLY: 'maybe' },
-    { GATE_JWKS_URI: 'https://login.microsoftonline.com/common/discovery/v2.0/keys' },              // retired: no signature check in the gate
-    { GATE_JWKS_MAX_AGE_SECONDS: '600' },
-    { GATE_ALLOWED_TIDS: '9188040d-6c67-4c5b-b112-36a304b66dad' }, { GATE_ALLOWED_USERS: 'x' }, { GATE_REQUIRED_SCOPE: 'x' }, // retired: Softeria enforces
-    { MS365_MCP_OBO_ALLOWED_TENANTS: 'contoso' },                                                  // tenant ids are GUIDs
-    { GATE_ALLOW_INSECURE_TEST: '0', MS365_MCP_ATTACHMENT_URL_BASE: 'https://other.example' },      // unapproved attachment origin
-    { MS365_MCP_ALLOWED_SCOPES: 'Mail.Read' }, { MS365_MCP_ALLOWED_SCOPES: 'Mail.ReadWrite bad scope!' },  // scopes: drafts need Mail.ReadWrite; bad name
-    { MS365_MCP_EXTRA_SCOPES: 'Files.ReadWrite.All' },                                            // consent list must equal the allowed list
-    { GATE_DRAFT_ONLY: 'false' }, { GATE_TRUSTED_INGRESS: 'true' },                              // policy drift: switches
-    { GATE_POLICY_FILE: '/nonexistent/policy.json' },                                           // no alternate policy mechanism
-  ]) {
-    const r = await startGate({ UPSTREAM_PORT: '1', ...env }, { expectExit: true });
+test('bad config fails startup', async () => {
+  for (const env of [{ UPSTREAM_PORT: 'x' }, { GATE_READ_MAIL_TEXT_MAX_CHARS: '10' }, { GATE_MCP_MAX_BODY_MB: '0' }]) {
+    const r = await startGate(env, { expectExit: true });
     assert.equal(r.code, 1, JSON.stringify(env));
     assert.match(r.out, /"cat":"config"/);
   }
 });
 
-test('GATE_POLICY_FILE is refused even when it points at a real file', async () => {
-  const r = await startGate({ UPSTREAM_PORT: '1', GATE_POLICY_FILE: require('path').join(__dirname, '..', 'policy.json') }, { expectExit: true });
-  assert.equal(r.code, 1);
-  assert.match(r.out, /GATE_POLICY_FILE is not supported/);
-});
-
-test('policy schema is strict: wrong types and shapes fail startup, never weaken', async () => {
-  const bad = [
-    { ...POLICY, draftOnly: 'true' }, { ...POLICY, rejectToolNotifications: 'true' }, { ...POLICY, trustedIngress: 'false' },
-    { ...POLICY, hiddenTools: 'add-mail-attachment' }, { ...POLICY, hiddenTools: [] }, { ...POLICY, hiddenTools: ['graph-batch'] },
-    { ...POLICY, scopes: 'Mail.Send' }, { ...POLICY, scopes: ['Files.ReadWrite', ''] }, { ...POLICY, scopes: ['User.Read', 'Mail.Send'] },
-    { ...POLICY, excludedTools: 'x' }, { ...POLICY, excludedTools: ['graph-batch'] }, { ...POLICY, excludedTools: ['Bad Name'] },
-    { ...POLICY, version: '' }, { ...POLICY, extra: 1 }, [POLICY], 'not json {',
-    { ...POLICY, excludedTools: ['get-upload-url'] }, { ...POLICY, hiddenTools: [...POLICY.hiddenTools, 'get-download-url'] }, { ...POLICY, excludedTools: ['get-mail-message'] },
-  ];
-  for (const rawPolicy of bad) {
-    const r = await startGate({ UPSTREAM_PORT: '1' }, { expectExit: true, rawPolicy });
-    assert.equal(r.code, 1, JSON.stringify(rawPolicy).slice(0, 80));
-    assert.match(r.out, /"cat":"config"/);
-  }
-  const { description, ...noDesc } = POLICY;
-  const g = await startGate({ UPSTREAM_PORT: String(up.port) }, { rawPolicy: noDesc });
-  g.close();
-});
-
-test('operator scopes: MS365_MCP_ALLOWED_SCOPES overrides the policy default; /health counts tools once listed', async () => {
-  const g = await startGate({ ...baseEnv(), MS365_MCP_ALLOWED_SCOPES: 'User.Read Mail.ReadWrite Mail.Send', MS365_MCP_EXTRA_SCOPES: 'Mail.Send Mail.ReadWrite User.Read', GATE_DRAFT_ONLY: 'true' });
-  const h = await call(g.port, '/health', { method: 'GET' });
-  assert.deepEqual(h.json.scopes, ['User.Read', 'Mail.ReadWrite', 'Mail.Send']);
-  assert.equal(h.json.tools, null, 'unknown until a client lists tools');
-  await call(g.port, '/mcp', { headers: H(signer.mint()), body: RPC('tools/list', {}) });
-  assert.equal((await call(g.port, '/health', { method: 'GET' })).json.tools, 3);
-  g.close();
-  const g2 = await startGate({ ...baseEnv() }, { policy: { excludedTools: [] } });
-  g2.close();
-});
-
-test('approved attachment origin is accepted', async () => {
-  const g = await startGate({ UPSTREAM_PORT: String(up.port), GATE_ALLOW_INSECURE_TEST: '0', MS365_MCP_ATTACHMENT_URL_BASE: 'https://relay.example' });
-  g.close();
-});
-
-async function waitForLog(g, needle, ms = 2000) {
-  const t0 = Date.now();
-  while (Date.now() - t0 < ms) { if (g.output().includes(needle)) return true; await new Promise((r) => setTimeout(r, 25)); }
-  return false;
-}
-
-// ---- tokens: Softeria's job; the gate only requires a bearer ---------------------
-test('no bearer (or an empty one): 401 with the resource-metadata challenge, nothing upstream', async () => {
+// ---- pass-through -----------------------------------------------------------
+test('non-MCP routes stream through untouched: method, path, query, body, status, headers', async () => {
   up.seen.length = 0;
-  for (const headers of [{ 'content-type': 'application/json' }, { authorization: 'Basic abc', 'content-type': 'application/json' }, { authorization: 'Bearer x', 'content-type': 'application/json' }]) {
-    const r = await call(gate.port, '/mcp', { headers, body: RPC('initialize', {}) });
-    assert.equal(r.status, 401);
-    assert.equal(r.json.error_description, 'invalid token');
-    assert.match(r.headers.get('www-authenticate'), /resource_metadata="https:\/\/relay\.example\/\.well-known\/oauth-protected-resource"/);
-  }
-  assert.equal(up.seen.length, 0);
+  const r = await call(gate.port, '/attachment?t=abc', { method: 'PUT', headers: { 'content-type': 'application/octet-stream', 'x-custom': '1' }, body: 'bytes' });
+  assert.equal(r.status, 201);
+  assert.equal(r.text, 'echo PUT /attachment?t=abc bytes');
+  assert.equal(r.headers.get('x-upstream'), 'yes');
+  assert.equal(up.seen[0].headers['x-custom'], '1');
+  const g = await call(gate.port, '/authorize?scope=x&state=s', { method: 'GET' });
+  assert.equal(g.text, 'echo GET /authorize?scope=x&state=s ', 'the caller\'s query, scope included, reaches Softeria as sent');
 });
 
-test('valid token reaches upstream with a canonical client address and allowlisted headers', async () => {
+test('the client address is appended to X-Forwarded-For, as any proxy does', async () => {
   up.seen.length = 0;
-  const r = await call(gate.port, '/mcp', { headers: { ...H(signer.mint()), 'x-forwarded-host': 'evil', 'x-forwarded-proto': 'http', cookie: 'a=b', 'x-forwarded-for': '203.0.113.9, 198.51.100.7' }, body: RPC('tools/call', { name: 'list-mail-messages', arguments: {} }) });
-  assert.equal(r.status, 200);
+  await call(gate.port, '/x', { method: 'GET', headers: { 'x-forwarded-for': '203.0.113.9' } });
+  await call(gate.port, '/x', { method: 'GET' });
+  assert.equal(up.seen[0].headers['x-forwarded-for'], '203.0.113.9, 127.0.0.1');
+  assert.equal(up.seen[1].headers['x-forwarded-for'], '127.0.0.1');
+});
+
+test('MCP calls other than read-mail-text pass through with the caller\'s bearer; Softeria\'s answers come back as is', async () => {
+  up.seen.length = 0;
+  const tok = mint();
+  const r = await call(gate.port, '/mcp', { headers: H(tok), body: RPC('tools/call', { name: 'list-mail-messages', arguments: {} }) });
   assert.equal(JSON.parse(r.json.result.content[0].text).called, 'list-mail-messages');
-  const h = up.seen[0].headers;
-  assert.equal(h['x-forwarded-for'], '127.0.0.1', 'default policy: the socket peer, never a client-supplied chain');
-  assert.equal(h['x-forwarded-host'], 'relay.example');
-  assert.equal(h['x-forwarded-proto'], 'https');
-  assert.equal(h.cookie, undefined);
-  assert.match(h['x-request-id'], /^[0-9a-f-]{36}$/);
-  assert.equal(h.host, `127.0.0.1:${up.port}`);
-  // Responses: no CORS from upstream, security headers and the request id present.
-  assert.equal(r.headers.get('access-control-allow-origin'), null);
-  assert.equal(r.headers.get('cache-control'), 'no-store');
-  assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
-  assert.equal(r.headers.get('referrer-policy'), 'no-referrer');
-  assert.match(r.headers.get('x-request-id'), /^[0-9a-f-]{36}$/);
+  assert.equal(up.seen[0].headers.authorization, `Bearer ${tok}`);
+  assert.equal(r.headers.get('mcp-session-id'), 'S1');
+  const none = await call(gate.port, '/mcp', { headers: { 'content-type': 'application/json' }, body: RPC('tools/list', {}) });
+  assert.equal(none.status, 401, 'no bearer: Softeria\'s 401');
+  assert.match(none.headers.get('www-authenticate'), /resource_metadata=/);
+  const batch = await call(gate.port, '/mcp', { headers: H(tok), body: JSON.stringify([JSON.parse(RPC('ping', {}))]) });
+  assert.equal(batch.json.result.batch, true, 'batches are Softeria\'s business');
 });
 
-test('with a policy-declared trusted ingress only the ingress-appended (last) entry is used', async () => {
-  const g = await startGate(baseEnv(), { policy: { ...NEUTRAL, trustedIngress: true } });
-  try {
-    up.seen.length = 0;
-    await call(g.port, '/mcp', { headers: { ...H(signer.mint()), 'x-forwarded-for': '203.0.113.9, 198.51.100.7' }, body: RPC('ping', {}) });
-    assert.equal(up.seen[0].headers['x-forwarded-for'], '198.51.100.7');
-  } finally { g.close(); }
-});
-
-test('forged X-Forwarded-For cannot evade the per-IP limit by default', async () => {
-  const g = await startGate({ ...baseEnv(), GATE_RATE_LIMIT_PER_MIN: '1' }, { policy: NEUTRAL });
-  try {
-    const a = await call(g.port, '/mcp', { headers: { 'x-forwarded-for': '1.1.1.1' }, body: '{}' });
-    const b = await call(g.port, '/mcp', { headers: { 'x-forwarded-for': '2.2.2.2' }, body: '{}' });
-    assert.deepEqual([a.status, b.status], [401, 429]);
-  } finally { g.close(); }
-});
-
-test('rate-key map is bounded', async () => {
-  const g = await startGate({ ...baseEnv(), GATE_RATE_LIMIT_PER_MIN: '100', GATE_RATE_MAX_KEYS: '100' }, { policy: { ...NEUTRAL, trustedIngress: true } });
-  try {
-    for (let i = 0; i < 150; i++) await call(g.port, '/mcp', { headers: { 'x-forwarded-for': `10.0.${Math.floor(i / 250)}.${i % 250}` }, body: '{}' });
-    const r = await call(g.port, '/mcp', { headers: { 'x-forwarded-for': '10.9.9.9' }, body: '{}' });
-    assert.equal(r.status, 401, 'still serving after more keys than the cap');
-  } finally { g.close(); }
-});
-
-test('any bearer is passed to Softeria, whose OBO exchange with Microsoft judges it; its 401/403 reach the client', async () => {
+test('an oversized MCP body is refused before Softeria', async () => {
   up.seen.length = 0;
-  const forged = signer.mint({ aud: 'someone-else' }).slice(0, -4) + 'AAAA';
-  const r = await call(gate.port, '/mcp', { headers: H(forged), body: RPC('ping', {}) });
-  assert.equal(r.status, 200);
-  assert.equal(up.seen[0].headers.authorization, `Bearer ${forged}`);
-  // Refused by Softeria on a direct call, and on the gate's own internal calls.
-  const rejected = H(signer.mint({ oid: 'REJECT' }));
-  const direct = await call(gate.port, '/mcp', { headers: rejected, body: RPC('tools/list', {}) });
-  assert.equal(direct.status, 401);
-  assert.match(direct.headers.get('www-authenticate'), /invalid_token/);
-  const viaGate = await call(gate.port, '/mcp', { headers: rejected, body: RPC('tools/call', { name: 'read-mail-text', arguments: { folderId: 'inbox' } }) });
-  assert.equal(viaGate.status, 401, 'read-mail-text relays the refusal');
-  assert.match(viaGate.headers.get('www-authenticate'), /invalid_token/);
-  const g = await startGate(baseEnv(), { policy: { ...NEUTRAL, draftOnly: true } });
-  try {
-    const draft = await call(g.port, '/mcp', { headers: rejected, body: RPC('tools/call', { name: 'get-upload-url', arguments: { target: '/me/messages/DRAFT-AAMkADAwATMwMAItYzhhMC1mMjIBLTAwAi0wMAoARgAAA/attachments', name: 'a.pdf' } }) });
-    assert.equal(draft.status, 401, 'the draft check relays the refusal');
-  } finally { g.close(); }
-});
-
-// ---- routes ------------------------------------------------------------------
-test('exact open routes; /register never forwarded; look-alike paths need auth', async () => {
-  up.seen.length = 0;
-  assert.equal((await call(gate.port, '/register', { body: '{}' })).status, 404);
-  assert.equal((await call(gate.port, '/tokenanything', { body: '{}' })).status, 401);
-  assert.equal((await call(gate.port, '/authorizeX', { method: 'GET' })).status, 401);
-  assert.equal(up.seen.length, 0);
-  const wk = await call(gate.port, '/.well-known/oauth-protected-resource', { method: 'GET' });
-  assert.equal(wk.status, 200);
-});
-
-test('paths that are not in normal form are refused before routing (no encoded look-alikes of open routes)', async () => {
-  up.seen.length = 0;
-  // Sent on a raw socket: URL parsers (fetch, new URL) would collapse '.'/'..' and
-  // '//' before the request left the client, which is exactly what the gate must
-  // not rely on.
-  const raw = (target) => new Promise((resolve, reject) => {
-    const net = require('net');
-    const sock = net.connect(gate.port, '127.0.0.1', () => sock.write(`GET ${target} HTTP/1.1\r\nHost: relay.example\r\nConnection: close\r\n\r\n`));
-    let buf = '';
-    sock.on('data', (d) => { buf += d; }); sock.on('error', reject);
-    sock.on('close', () => { const m = /^HTTP\/1\.1 (\d+)/.exec(buf); resolve({ status: m ? Number(m[1]) : 0, text: buf }); });
-  });
-  for (const bad of ['/.well-known/%2F..%2Fmcp', '/.well-known/../mcp', '/.well-known/./x', '//token', '/%61uthorize', '/authorize%00', '/a//b', '/mcp\\x', '/' + 'a'.repeat(2100)]) {
-    const r = await raw(bad);
-    assert.equal(r.status, 400, bad);
-    assert.ok(r.text.includes('bad_request'), bad);
-  }
-  assert.equal(up.seen.length, 0, 'nothing reached upstream');
-  // A trailing slash is a plain path; '/.well-known/' is an open discovery prefix.
-  assert.equal((await raw('/.well-known/')).status, 200);
-});
-
-// ---- protocol shapes ---------------------------------------------------------
-test('JSON-RPC batches, non-objects and malformed bodies are refused', async () => {
-  up.seen.length = 0;
-  const tok = signer.mint();
-  assert.equal((await call(gate.port, '/mcp', { headers: H(tok), body: JSON.stringify([JSON.parse(RPC('tools/call', { name: 'download-bytes', arguments: {} }))]) })).status, 400);
-  assert.equal((await call(gate.port, '/mcp', { headers: H(tok), body: '"x"' })).status, 400);
-  assert.equal((await call(gate.port, '/mcp', { headers: H(tok), body: JSON.stringify({ jsonrpc: '2.0', id: 1 }) })).status, 400);
-  assert.equal((await call(gate.port, '/mcp', { headers: H(tok), body: '{not json' })).status, 400);
-  assert.equal(up.seen.length, 0, 'nothing reached upstream');
-});
-
-test('notifications: forwarded by default; tool-call notifications refused when the switch is on', async () => {
-  up.seen.length = 0;
-  const r = await call(gate.port, '/mcp', { headers: H(signer.mint()), body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
-  assert.equal(r.status, 200);
-  assert.equal(up.seen.length, 1);
-  const g = await startGate(baseEnv(), { policy: { ...NEUTRAL, rejectToolNotifications: true } });
-  try {
-    up.seen.length = 0;
-    const ok = await call(g.port, '/mcp', { headers: H(signer.mint()), body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
-    assert.equal(ok.status, 200);
-    const bad = await call(g.port, '/mcp', { headers: H(signer.mint()), body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/call', params: { name: 'list-mail-messages', arguments: {} } }) });
-    assert.equal(bad.status, 400);
-    assert.equal(up.seen.length, 1);
-  } finally { g.close(); }
-});
-
-test('oversized MCP body is refused before upstream', async () => {
-  up.seen.length = 0;
-  const r = await call(gate.port, '/mcp', { headers: H(signer.mint()), body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { pad: 'x'.repeat(5 * 1024 * 1024) } }) });
+  const r = await call(gate.port, '/mcp', { headers: H(mint()), body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { pad: 'x'.repeat(5 * 1024 * 1024) } }) });
   assert.equal(r.status, 413);
   assert.equal(up.seen.length, 0);
 });
 
-// ---- MCP glue ------------------------------------------------------------------
-test('initialize replaces instructions; tools/list hides superseded and excluded tools and appends read-mail-text', async () => {
-  const init = await call(gate.port, '/mcp', { headers: H(signer.mint()), body: RPC('initialize', {}) });
-  assert.match(init.json.result.instructions, /^Microsoft 365 relay/);
-  assert.match(init.json.result.instructions, /get-upload-url/);
-  assert.match(init.json.result.instructions, /read-mail-text/);
-  const list = await call(gate.port, '/mcp', { headers: H(signer.mint()), body: RPC('tools/list', {}) });
-  assert.deepEqual(list.json.result.tools.map((t) => t.name), ['list-mail-messages', 'get-upload-url', 'read-mail-text']);
-  up.seen.length = 0;
-  for (const name of ['add-mail-attachment', 'create-mail-attachment-upload-session', 'add-calendar-event-attachment', 'create-calendar-event-attachment-upload-session', 'graph-batch', 'download-bytes', 'download-bytes-to-file', 'get-mail-attachment-content']) {
-    const r = await call(gate.port, '/mcp', { headers: H(signer.mint()), body: RPC('tools/call', { name, arguments: {} }) });
-    assert.equal(r.json.result.isError, true, name);
-    assert.equal(JSON.parse(r.json.result.content[0].text).error, 'tool_not_available');
-  }
-  assert.equal(up.seen.length, 0, 'hidden tools never reach upstream from outside');
-});
-
-// ---- /authorize -----------------------------------------------------------------
-test('/authorize: the caller scope is replaced by the relay scope before Softeria sees it', async () => {
-  up.seen.length = 0;
-  const r = await call(gate.port, '/authorize?response_type=code&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&state=s&scope=Files.ReadWrite.All%20evil', { method: 'GET' });
-  assert.equal(r.status, 302);
-  const sent = new URL(up.seen[0].url, 'http://x').searchParams;
-  assert.equal(sent.get('scope'), `${CLIENT_ID}/access_as_user`);
-  assert.equal(sent.get('state'), 's');
-});
-
-// ---- health / rate limiting --------------------------------------------------
-test('/health reflects upstream readiness', async () => {
-  assert.equal((await call(gate.port, '/health', { method: 'GET' })).status, 200);
-  const dead = await startGate({ ...baseEnv(), UPSTREAM_PORT: '1' }, { policy: NEUTRAL });
-  try { assert.equal((await call(dead.port, '/health', { method: 'GET' })).status, 503); } finally { dead.close(); }
-});
-
-test('per-IP rate limit is off by default and enforced when set', async () => {
-  for (let i = 0; i < 5; i++) assert.equal((await call(gate.port, '/mcp', { body: '{}' })).status, 401);
-  const g = await startGate({ ...baseEnv(), GATE_RATE_LIMIT_PER_MIN: '3' }, { policy: NEUTRAL });
+// ---- tools/list -------------------------------------------------------------
+test('tools/list gains read-mail-text (JSON and SSE upstream answers)', async () => {
+  const r = await call(gate.port, '/mcp', { headers: H(mint()), body: RPC('tools/list', {}) });
+  assert.deepEqual(r.json.result.tools.map((t) => t.name), ['list-mail-messages', 'get-upload-url', 'read-mail-text']);
+  assert.equal(r.headers.get('mcp-session-id'), 'S1');
+  const sse = await startUpstream({ sse: true });
+  const g = await startGate({ UPSTREAM_PORT: String(sse.port) });
   try {
-    const codes = [];
-    for (let i = 0; i < 5; i++) codes.push((await call(g.port, '/mcp', { body: '{}' })).status);
-    assert.deepEqual(codes, [401, 401, 401, 429, 429]);
-    assert.equal((await call(g.port, '/attachment?t=x', { method: 'PUT', body: 'x' })).status, 429);
-  } finally { g.close(); }
+    const s = await call(g.port, '/mcp', { headers: H(mint()), body: RPC('tools/list', {}) });
+    assert.deepEqual(s.json.result.tools.map((t) => t.name).slice(-1), ['read-mail-text']);
+  } finally { g.close(); sse.close(); }
+  const rejected = await call(gate.port, '/mcp', { headers: H(mint({ oid: 'REJECT' })), body: RPC('tools/list', {}) });
+  assert.equal(rejected.status, 401, 'a refused caller gets Softeria\'s 401, not a tool list');
 });
 
-// ---- attachment tickets (Softeria) --------------------------------------------
-test('/attachment is open (the ticket is the credential), GET/PUT only, forwarded as sent', async () => {
+// ---- read-mail-text ---------------------------------------------------------
+test('read-mail-text by ids: get-mail-message per id as the caller, cleaned, unknown ids reported', async () => {
   up.seen.length = 0;
-  assert.equal((await call(gate.port, '/attachment?t=abc', { method: 'GET' })).status, 200);
-  assert.equal((await call(gate.port, '/attachment?t=abc', { method: 'PUT', body: 'bytes' })).status, 200);
-  assert.deepEqual(up.seen.map((x) => [x.method, x.url, x.body]), [['GET', '/attachment?t=abc', ''], ['PUT', '/attachment?t=abc', 'bytes']]);
-  assert.equal(up.seen[0].headers.authorization, undefined);
-  assert.equal((await call(gate.port, '/attachment?t=abc', { method: 'POST', body: 'x' })).status, 405);
-  assert.equal((await call(gate.port, '/attachment/x', { method: 'GET' })).status, 401, 'exact route only');
-});
-
-const upload = (target) => RPC('tools/call', { name: 'get-upload-url', arguments: { target, name: 'a.pdf' } });
-
-test('draft-only: get-upload-url for mail is forwarded only for a draft; events pass to Softeria', async () => {
-  const g = await startGate(baseEnv(), { policy: { ...NEUTRAL, draftOnly: true } });
-  try {
-    const tok = signer.mint();
-    up.seen.length = 0;
-    const sent = await call(g.port, '/mcp', { headers: H(tok), body: upload(`/me/messages/${SENT}/attachments`) });
-    assert.equal(JSON.parse(sent.json.result.content[0].text).error, 'not_a_draft');
-    assert.ok(!up.seen.some((x) => x.body.includes('"get-upload-url"')), 'refused before Softeria');
-    const bad = await call(g.port, '/mcp', { headers: H(tok), body: upload('/me/messages/..%2Fx/attachments') });
-    assert.equal(JSON.parse(bad.json.result.content[0].text).error, 'invalid_message_id');
-    const ok = await call(g.port, '/mcp', { headers: H(tok), body: upload(`/me/messages/${DRAFT}/attachments`) });
-    assert.equal(JSON.parse(ok.json.result.content[0].text).called, 'get-upload-url');
-    const evt = await call(g.port, '/mcp', { headers: H(tok), body: upload('/me/events/EVT-AAMkADAwATMwMAItYzhhMC1mMjIBLTAwAi0wMAoARgAAA/attachments') });
-    assert.equal(JSON.parse(evt.json.result.content[0].text).called, 'get-upload-url');
-    const lookup = up.seen.find((x) => x.body.includes('"get-mail-message"'));
-    assert.equal(lookup.headers.authorization, `Bearer ${tok}`, 'the draft check runs as the caller');
-  } finally { g.close(); }
-  // Switch off: forwarded without a lookup.
-  up.seen.length = 0;
-  const r = await call(gate.port, '/mcp', { headers: H(signer.mint()), body: upload(`/me/messages/${SENT}/attachments`) });
-  assert.equal(JSON.parse(r.json.result.content[0].text).called, 'get-upload-url');
-  assert.ok(!up.seen.some((x) => x.body.includes('"get-mail-message"')));
-});
-
-// ---- read-mail-text -------------------------------------------------------------
-test('read-mail-text: answered by the gate through graph-batch as the caller, cleaned', async () => {
-  const tok = signer.mint();
-  up.seen.length = 0;
-  const r = await call(gate.port, '/mcp', { headers: H(tok), body: RPC('tools/call', { name: 'read-mail-text', arguments: { messageIds: ['AAA', 'MISSING-1'] } }) });
+  const tok = mint();
+  const r = await call(gate.port, '/mcp', { headers: H(tok), body: READ({ messageIds: ['AAA', 'MISSING-1'] }) });
   assert.equal(r.json.result.isError, false);
   const out = JSON.parse(r.json.result.content[0].text);
   assert.equal(out[0].text, 'Body AAA');
   assert.deepEqual(out[1], { id: 'MISSING-1', error: 'not found' });
-  assert.equal(up.seen.length, 1);
-  const sent = JSON.parse(up.seen[0].body);
-  assert.equal(sent.params.name, 'graph-batch');
-  assert.equal(sent.params.arguments.body.requests[0].headers.Prefer, 'outlook.body-content-type="text"');
-  assert.equal(up.seen[0].headers.authorization, `Bearer ${tok}`);
+  const calls = up.seen.map((x) => JSON.parse(x.body).params);
+  assert.deepEqual(calls.map((c) => [c.name, c.arguments.messageId]).sort(), [['get-mail-message', 'AAA'], ['get-mail-message', 'MISSING-1']]);
+  assert.match(calls[0].arguments.select, /\bbody\b/);
+  for (const x of up.seen) assert.equal(x.headers.authorization, `Bearer ${tok}`);
+});
+
+test('read-mail-text by folder: list-mail-folder-messages with top and search passed for Softeria to normalise', async () => {
   up.seen.length = 0;
-  const f = JSON.parse((await call(gate.port, '/mcp', { headers: H(tok), body: RPC('tools/call', { name: 'read-mail-text', arguments: { folderId: 'inbox', top: 2, search: 'subject:"q report"' } }) })).json.result.content[0].text);
-  assert.deepEqual(f.map((m) => m.text), ['Body F1', 'Body F2']);
-  const lst = JSON.parse(up.seen[0].body).params;
-  assert.equal(lst.name, 'list-mail-folder-messages');
-  assert.deepEqual([lst.arguments.mailFolderId, lst.arguments.top, lst.arguments.search], ['inbox', 2, 'subject:"q report"']);
-  assert.equal(up.seen[0].headers.authorization, `Bearer ${tok}`);
-  const badFilter = await call(gate.port, '/mcp', { headers: H(tok), body: RPC('tools/call', { name: 'read-mail-text', arguments: { folderId: 'inbox', filter: 'bad' } }) });
-  assert.equal(badFilter.json.result.isError, true);
-  assert.equal(JSON.parse(badFilter.json.result.content[0].text).error, 'read_failed');
-  const bad = await call(gate.port, '/mcp', { headers: H(tok), body: RPC('tools/call', { name: 'read-mail-text', arguments: {} }) });
+  const r = await call(gate.port, '/mcp', { headers: H(mint()), body: READ({ folderId: 'inbox', top: 2, search: 'subject:"q report"' }) });
+  assert.deepEqual(JSON.parse(r.json.result.content[0].text).map((m) => m.text), ['Body F1', 'Body F2']);
+  const c = JSON.parse(up.seen[0].body).params;
+  assert.equal(c.name, 'list-mail-folder-messages');
+  assert.deepEqual([c.arguments.mailFolderId, c.arguments.top, c.arguments.search], ['inbox', 2, 'subject:"q report"']);
+});
+
+test('read-mail-text errors: bad arguments, a Graph error, and a refused caller (Softeria\'s 401 relayed)', async () => {
+  const bad = await call(gate.port, '/mcp', { headers: H(mint()), body: READ({}) });
   assert.equal(bad.json.result.isError, true);
   assert.match(JSON.parse(bad.json.result.content[0].text).error, /messageIds or folderId/);
+  const graph = await call(gate.port, '/mcp', { headers: H(mint()), body: READ({ folderId: 'inbox', filter: 'bad' }) });
+  assert.equal(graph.json.result.isError, true);
+  assert.match(JSON.parse(graph.json.result.content[0].text).error, /Invalid filter clause/);
+  const refused = await call(gate.port, '/mcp', { headers: H(mint({ oid: 'REJECT' })), body: READ({ folderId: 'inbox' }) });
+  assert.equal(refused.status, 401);
+  assert.match(refused.headers.get('www-authenticate'), /invalid_token/);
+  up.seen.length = 0;
+  const noBearer = await call(gate.port, '/mcp', { headers: { 'content-type': 'application/json' }, body: READ({ folderId: 'inbox' }) });
+  assert.equal(noBearer.status, 401, 'no bearer: passed to Softeria, which answers 401');
+  assert.equal(up.seen.length, 1);
 });
 
 test('read-mail-text: a result over the limit is refused whole', async () => {
-  const g = await startGate({ ...baseEnv(), GATE_READ_MAIL_TEXT_MAX_CHARS: '1000' }, { policy: NEUTRAL });
+  const big = await startUpstream({ bigBodies: true });
+  const g = await startGate({ UPSTREAM_PORT: String(big.port), GATE_READ_MAIL_TEXT_MAX_CHARS: '50000' });
   try {
-    const ids = Array.from({ length: 20 }, (_, i) => `ID-${i}-` + 'x'.repeat(40));
-    const r = await call(g.port, '/mcp', { headers: H(signer.mint()), body: RPC('tools/call', { name: 'read-mail-text', arguments: { messageIds: ids } }) });
+    const r = await call(g.port, '/mcp', { headers: H(mint()), body: READ({ folderId: 'inbox', top: 20 }) });
     assert.equal(r.json.result.isError, true);
-    assert.match(JSON.parse(r.json.result.content[0].text).error, /^Response would be [\d,]+ characters \(limit 1,000\)/);
-  } finally { g.close(); }
+    assert.match(JSON.parse(r.json.result.content[0].text).error, /^Response would be [\d,]+ characters \(limit 50,000\)/);
+    const ok = await call(g.port, '/mcp', { headers: H(mint()), body: READ({ folderId: 'inbox', top: 20, maxChars: 1000 }) });
+    assert.equal(JSON.parse(ok.json.result.content[0].text).length, 20);
+  } finally { g.close(); big.close(); }
 });
 
-test('logs are structured and carry no upstream text', async () => {
+test('logs are structured and carry no mail content or tokens', async () => {
   const out = gate.output();
-  const lines = out.trim().split('\n').filter((l) => l.startsWith('{'));
-  assert.ok(lines.length > 10);
-  for (const l of lines) { const j = JSON.parse(l); assert.ok(j.ts && (j.cat || j.level), l); }
-  assert.doesNotMatch(out, /UPSTREAM DEFAULT|Bearer |contentBytes|aGVsbG8/);
+  for (const l of out.trim().split('\n').filter(Boolean)) assert.ok(JSON.parse(l).cat, l);
+  assert.doesNotMatch(out, /Body AAA|Bearer |eyJ/);
 });

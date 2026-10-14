@@ -107,24 +107,26 @@ function msg(id, subject, content, extra) {
     toRecipients: [{ emailAddress: { name: 'J', address: 'j@y.com' } }], ccRecipients: [], receivedDateTime: '2026-10-07T10:00:00Z', hasAttachments: false, ...extra };
 }
 
-test('messageIds: one graph-batch asking for text bodies; mixed found/unknown ids', async () => {
+test('messageIds: get-mail-message per id (text body selected); unknown and malformed ids reported per message', async () => {
   const calls = [];
   const callTool = async (name, args) => {
     calls.push({ name, args });
-    return { responses: [
-      { id: '1', status: 404, body: { error: { code: 'ErrorItemNotFound', message: 'x' } } },
-      { id: '0', status: 200, body: msg('A', 'Hello', 'Hi J\n\nOn Mon, Paul wrote:\n> old') },
-    ] };
+    if (args.messageId === 'B/=') throw new Error('Microsoft Graph API error: 404 Not Found - {"error":{"code":"ErrorItemNotFound","message":"x"}}');
+    if (args.messageId === 'bad') throw new Error('Microsoft Graph API error: 400 Bad Request - {"error":{"code":"ErrorInvalidIdMalformed","message":"Id is malformed."}}');
+    return msg('A', 'Hello', 'Hi J\n\nOn Mon, Paul wrote:\n> old');
   };
-  const out = await readMailText({ messageIds: ['A', 'B/='] }, callTool, 80000);
-  assert.strictEqual(calls.length, 1);
-  assert.strictEqual(calls[0].name, 'graph-batch');
-  const rq = calls[0].args.body.requests;
-  assert.strictEqual(rq[1].url.startsWith('/me/messages/B%2F%3D?'), true);
-  assert.strictEqual(rq[0].headers.Prefer, 'outlook.body-content-type="text"');
+  const out = await readMailText({ messageIds: ['A', 'B/=', 'bad'] }, callTool, 80000);
+  assert.deepStrictEqual(calls.map((c) => [c.name, c.args.messageId]), [['get-mail-message', 'A'], ['get-mail-message', 'B/='], ['get-mail-message', 'bad']]);
+  assert.match(calls[0].args.select, /\bbody\b/);
   assert.deepStrictEqual(out[0], { id: 'A', from: 'Paul <p@x.com>', to: ['J <j@y.com>'], cc: [], subject: 'Hello',
     received: '2026-10-07T10:00:00Z', hasAttachments: false, text: 'Hi J', chars: 4, truncated: false });
   assert.deepStrictEqual(out[1], { id: 'B/=', error: 'not found' });
+  assert.deepStrictEqual(out[2], { id: 'bad', error: 'ErrorInvalidIdMalformed: Id is malformed.' });
+});
+
+test('a refused caller is not a per-message error: the refusal propagates', async () => {
+  const refusal = Object.assign(new Error('refused'), { refusal: { status: 401 } });
+  await assert.rejects(readMailText({ messageIds: ['A'] }, async () => { throw refusal; }, 80000), (e) => e === refusal);
 });
 
 test('folder mode: list-mail-folder-messages with top, filter or search passed through for Softeria to normalise', async () => {

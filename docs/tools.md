@@ -1,8 +1,8 @@
 # Tool reference and recommended Claude permissions
 
-Policy `2026-10-14.1` (Softeria 0.166.0) is **scope-led**: users consent to `User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Contacts.ReadWrite MailboxSettings.ReadWrite Files.ReadWrite`; Softeria's `--allowed-scopes` derives the tool surface from those scopes at every container start (every tool whose required scopes are covered; 142 registered for the default list, 138 visible to Claude). Scopes are set by the operator (`MS365_MCP_ALLOWED_SCOPES`). Tools are not picked by hand; the only exceptions are tools the relay replaces with better ones: `download-bytes`/`download-bytes-to-file`/`get-mail-attachment-content` (excluded; `get-download-url` replaces them) and four base64/upload-session attachment primitives for mail and events (hidden; Softeria's `get-upload-url` replaces them). The gate adds one tool, `read-mail-text`.
+Policy `2026-10-14.2` (Softeria 0.166.0) is **scope-led**: users consent to `User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Contacts.ReadWrite MailboxSettings.ReadWrite Files.ReadWrite`; Softeria's `--allowed-scopes` derives the tool surface from those scopes at every container start (every tool whose required scopes are covered; 137 registered for the default list, 138 visible to Claude with `read-mail-text`). Scopes are set by the operator (`MS365_MCP_ALLOWED_SCOPES`). Tools are not picked by hand; the only exceptions are tools the relay replaces with better ones: `download-bytes`/`download-bytes-to-file`/`get-mail-attachment-content` (excluded; `get-download-url` replaces them) the four base64/upload-session attachment writes for mail and events (excluded; Softeria's `get-upload-url` replaces them) and `graph-batch` (excluded; it would bypass those). The gate adds one tool, `read-mail-text`.
 
-Columns: **Effect** = what the tool does (Softeria's own description, first sentence). **State**: `Allow` (exposed; Always allow in Claude), `Approve` (exposed; Needs approval in Claude), `Hidden` (registered for the relay's own use, never listed to Claude), `Off` (not exposed — the scope isn't granted, the tool is work-tenant only, or the relay replaces it with a better tool; the Why says which). 
+Columns: **Effect** = what the tool does (Softeria's own description, first sentence). **State**: `Allow` (exposed; Always allow in Claude), `Approve` (exposed; Needs approval in Claude), `Hidden` (none since 1.4.0), `Off` (not exposed — the scope isn't granted, the tool is work-tenant only, or the relay replaces it with a better tool; the Why says which). 
 Principle: anything that leaves the mailbox (sends), destroys data, grants someone else access, or commits the user to something (calendar responses) = Approve. Reads, drafts and reversible edits inside the user's own data = Allow.
 
 ## Gate tool
@@ -15,12 +15,12 @@ Principle: anything that leaves the mailbox (sends), destroys data, grants someo
 
 | Tool | Effect | State | Why |
 |---|---|---|---|
-| add-mail-attachment | Use this API to create a new Attachment (base64 contentBytes) | Hidden | replaced by get-upload-url (one-time upload link) |
+| add-mail-attachment | Use this API to create a new Attachment (base64 contentBytes) | Off | excluded: replaced by get-upload-url (one-time upload link) |
 | copy-mail-message | Copy a message to a folder within the user's mailbox | Allow | reversible edit inside the user's own data |
 | create-draft-email | Create a draft Outlook email message in the signed-in user's Drafts folder | Allow | nothing sent until send-draft-message |
 | create-focused-inbox-override | Create an override for a sender identified by an SMTP address | Allow | reversible edit inside the user's own data |
 | create-forward-draft | Create a forward draft | Allow | nothing sent until send-draft-message |
-| create-mail-attachment-upload-session | Create an upload session that allows an app to iteratively upload ranges of a file, so as to attach the file to the specified Outlook item | Hidden | replaced by get-upload-url (Softeria runs the upload session itself) |
+| create-mail-attachment-upload-session | Create an upload session that allows an app to iteratively upload ranges of a file, so as to attach the file to the specified Outlook item | Off | excluded: replaced by get-upload-url (one-time upload link) |
 | create-mail-child-folder | Use this API to create a new child mailFolder | Allow | reversible edit inside the user's own data |
 | create-mail-folder | Use this API to create a new mail folder in the root folder of the user's mailbox | Allow | reversible edit inside the user's own data |
 | create-mail-rule | Create a messageRule object by specifying a set of conditions and actions | Approve | mail rules can silently forward, move or delete future mail |
@@ -121,8 +121,8 @@ Principle: anything that leaves the mailbox (sends), destroys data, grants someo
 | update-my-calendar-permission | Update my calendar permission | Approve | grants another person access (calendar share/delegate, OneDrive sharing link) |
 | update-place | Updates properties of a place (room, room list, building, floor, section, desk, workspace) | Off | work-tenant only; not available on personal accounts; tenant admin decision (needs admin-consented scopes) |
 | update-specific-calendar-event | Update a specific calendar event | Allow | reversible edit inside the user's own data |
-| add-calendar-event-attachment | Attach a file under 3 MB to an event (base64 contentBytes) | Hidden | replaced by get-upload-url (one-time upload link) |
-| create-calendar-event-attachment-upload-session | Upload session for an event attachment of 3–150 MB | Hidden | replaced by get-upload-url (Softeria runs the upload session itself) |
+| add-calendar-event-attachment | Attach a file under 3 MB to an event (base64 contentBytes) | Off | excluded: replaced by get-upload-url (one-time upload link) |
+| create-calendar-event-attachment-upload-session | Upload session for an event attachment of 3–150 MB | Off | excluded: replaced by get-upload-url (one-time upload link) |
 
 ## Contacts
 
@@ -219,7 +219,7 @@ Principle: anything that leaves the mailbox (sends), destroys data, grants someo
 | create-subscription | Creates a webhook subscription for change notifications | Approve | registers a callback URL for change notifications; exposed (no scope needed) — block in Claude if unwanted |
 | delete-subscription | Deletes a webhook subscription | Approve | registers a callback URL for change notifications; exposed (no scope needed) — block in Claude if unwanted |
 | get-subscription | Gets a specific webhook subscription by id | Approve | registers a callback URL for change notifications; exposed (no scope needed) — block in Claude if unwanted |
-| graph-batch | Combine up to 20 Graph requests into a single HTTP call | Hidden | used by read-mail-text over loopback, as the user; a raw batch would bypass the hidden/excluded tools |
+| graph-batch | Combine up to 20 Graph requests into a single HTTP call | Off | excluded: a raw Graph call would bypass the link tools' replacements of the base64 file tools |
 | list-subscriptions | Lists webhook subscriptions owned by the current app/user | Approve | registers a callback URL for change notifications; exposed (no scope needed) — block in Claude if unwanted |
 | reauthorize-subscription | Reauthorizes a subscription after receiving a 'reauthorizationRequired' lifecycle notification from Microsoft Graph | Approve | registers a callback URL for change notifications; exposed (no scope needed) — block in Claude if unwanted |
 | update-subscription | Renews a webhook subscription by extending its expiration | Approve | registers a callback URL for change notifications; exposed (no scope needed) — block in Claude if unwanted |
@@ -431,5 +431,5 @@ Principle: anything that leaves the mailbox (sends), destroys data, grants someo
 | list-trending-insights | Lists documents trending around the current user | Off | needs a scope the policy does not grant (Sites.Read.All) |
 
 ## Summary
-- 355 rows: 354 tools in Softeria 0.166.0 (`--org-mode`, no filter) + the gate's `read-mail-text`: Allow 96, Approve 42, Hidden 5, Off 212.
-- Registered with the default scopes (policy 2026-10-14.1, personal account): 142 (137 visible + 5 hidden); Claude sees 138 with `read-mail-text`.
+- 355 rows: 354 tools in Softeria 0.166.0 (`--org-mode`, no filter) + `read-mail-text`: Allow 96, Approve 42, Off 217.
+- Registered with the default scopes (policy 2026-10-14.2, personal account): 137; Claude sees 138 with `read-mail-text`.
