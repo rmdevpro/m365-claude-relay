@@ -9,7 +9,7 @@ Principle: anything that leaves the mailbox (sends), destroys data, grants someo
 
 | Tool | Effect | State | Why |
 |---|---|---|---|
-| read-mail-text | up to 20 messages as text with only the bulk junk removed (invisible padding, image placeholders, quoted reply history); links kept (Safe Links unwrapped, long tracking addresses shortened); the message itself is never cut; an over-limit result is refused whole | Allow | read-only; carried by the relay until Softeria#708 ships |
+| read-mail-text | up to 20 messages as text with only the bulk junk removed (runs of invisible padding, image-file placeholders, quoted reply history from its header down); links kept (Safe Links, Proofpoint and Google redirects unwrapped, tracking parameters dropped, only addresses over 300 characters shortened); everything else as the message has it, except line endings (`\n`) and `⟦ ⟧` shown as `[ ]`; a body over 300,000 characters is cleaned only that far (`truncated`); an over-limit result is refused whole | Allow | read-only; carried by the relay until Softeria#708 ships |
 
 ## Mail
 

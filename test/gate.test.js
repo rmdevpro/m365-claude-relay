@@ -87,7 +87,7 @@ test('read-mail-text by ids: get-mail-message per id as the caller, cleaned, unk
   const r = await call(gate.port, '/mcp', { headers: H(tok), body: READ({ messageIds: ['AAA', 'MISSING-1'] }) });
   assert.equal(r.json.result.isError, false);
   const out = JSON.parse(r.json.result.content[0].text);
-  assert.equal(out[0].text, 'Body AAA');
+  assert.equal(out[0].text, 'Body AAA\n\n');
   assert.deepEqual(out[1], { id: 'MISSING-1', error: 'not found' });
   const calls = up.seen.map((x) => JSON.parse(x.body).params);
   assert.deepEqual(calls.map((c) => [c.name, c.arguments.messageId]).sort(), [['get-mail-message', 'AAA'], ['get-mail-message', 'MISSING-1']]);
@@ -98,7 +98,7 @@ test('read-mail-text by ids: get-mail-message per id as the caller, cleaned, unk
 test('read-mail-text by folder: list-mail-folder-messages with top and search passed for Softeria to normalise', async () => {
   up.seen.length = 0;
   const r = await call(gate.port, '/mcp', { headers: H(mint()), body: READ({ folderId: 'inbox', top: 2, search: 'subject:"q report"' }) });
-  assert.deepEqual(JSON.parse(r.json.result.content[0].text).map((m) => m.text), ['Body F1', 'Body F2']);
+  assert.deepEqual(JSON.parse(r.json.result.content[0].text).map((m) => m.text), ['Body F1\n\n', 'Body F2\n\n']);
   const c = JSON.parse(up.seen[0].body).params;
   assert.equal(c.name, 'list-mail-folder-messages');
   assert.deepEqual([c.arguments.mailFolderId, c.arguments.top, c.arguments.search], ['inbox', 2, 'subject:"q report"']);

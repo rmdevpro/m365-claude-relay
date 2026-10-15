@@ -2,12 +2,16 @@
 //
 // Rule: remove obvious junk, never cut or rewrite the message itself. Bodies come
 // from Softeria's own mail tools as plain text (its default body format); then
-// cleanText() removes invisible padding characters, image placeholders whose only
-// content is an image address, and quoted reply history (earlier messages pasted
-// below a reply; forwards keep theirs). Links are kept: Outlook Safe Links are
-// unwrapped to the real address, which is kept in full when it is short; only long
-// (tracking-style) addresses are shortened to ⟦link: domain⟧. Signatures, footers
-// and everything else in the message are left as they are.
+// cleanText() removes runs of invisible padding characters, image placeholders (a
+// bracketed address of an image file), and quoted reply history from its header
+// down (earlier messages pasted below a reply; forwards keep theirs); anything
+// ambiguous is kept. Links are kept: links wrapped by mail
+// security or webmail (Safe Links, Proofpoint URL Defense, Google's redirect) are
+// unwrapped to the real address and tracking parameters (utm_* and the like) are
+// dropped; only an address still longer than 300 characters, a tracking redirect,
+// is shortened to ⟦link: domain⟧. Line endings become \n, and ⟦ ⟧ in the body
+// itself appear as [ ] (the marker brackets are reserved). Signatures, footers,
+// whitespace and everything else in the message are left as they are.
 //
 // Mail bodies are attacker-controlled: every pattern is bounded and linear, the
 // cleaner reads at most MAX_INPUT_CHARS per message (beyond that the message is
@@ -27,11 +31,13 @@ const TOOL_DEF = {
   title: 'Read mail as clean text',
   description:
     'Read up to 20 mail messages as text with the bulk junk removed: invisible padding, image placeholders and ' +
-    'quoted reply history (forwards keep theirs). Links are kept, unwrapped from Outlook Safe Links; only long ' +
-    'tracking-style addresses are shortened to ⟦link: domain⟧. The message itself, including signatures and ' +
-    'footers, is never cut or rewritten. Use get-mail-message for the raw body or the quoted thread. Give ' +
+    'quoted reply history (forwards keep theirs). Links are kept: Safe Links, Proofpoint and Google redirects are ' +
+    'unwrapped to the real address and tracking parameters (utm_* and similar) dropped; only an address still over ' +
+    '300 characters (a tracking redirect) is shortened to ⟦link: domain⟧. Everything else (signatures, footers, ' +
+    'whitespace) is left as the message has it; line endings become \\n and ⟦ ⟧ in the body itself appear as [ ]. ' +
+    'Use get-mail-message for the raw body or the quoted thread. Give ' +
     'messageIds, or folderId with optional top and filter or search (newest first). ' +
-    'Text is cut only when maxChars is set or a message is enormous (truncated: true). If the whole result would ' +
+    'Text is cut only when maxChars is set or a message exceeds 300,000 characters (truncated: true). If the whole result would ' +
     'be too large the call fails, naming the largest messages: narrow it with fewer messages, a filter, or maxChars.',
   inputSchema: {
     type: 'object',
@@ -41,7 +47,7 @@ const TOOL_DEF = {
       top: { type: 'integer', minimum: 1, maximum: MAX_TOP, description: `With folderId: how many messages, newest first (default and max ${MAX_TOP}).` },
       filter: { type: 'string', description: "With folderId: OData $filter, e.g. receivedDateTime ge 2026-10-01T00:00:00Z or from/emailAddress/address eq 'a@b.com'." },
       search: { type: 'string', description: 'With folderId: KQL search, e.g. from:paul subject:"quarterly report". Cannot be combined with filter.' },
-      maxChars: { type: 'integer', minimum: 1, description: 'Optional: cut each message text to this many characters (marked truncated). Unset = full cleaned text.' },
+      maxChars: { type: 'integer', minimum: 1, description: 'Optional: cut each message text to this many characters (marked truncated). Unset = the full cleaned text, except that a body over 300,000 characters is cleaned only that far (also marked truncated).' },
     },
     additionalProperties: false,
   },
@@ -55,42 +61,118 @@ class ToolError extends Error {}
 const MARK_OPEN = '⟦'; // ⟦
 const MARK_CLOSE = '⟧'; // ⟧
 const mark = (host) => `${MARK_OPEN}link: ${host}${MARK_CLOSE}`;
-const MARK_RE = /⟦link: [^⟦⟧\n]{1,300}⟧/g;
-const MAX_KEPT_URL = 120; // longer addresses are tracking-style junk: shortened to the domain
+// Addresses still longer than this after unwrapping and dropping tracking
+// parameters are shortened to the domain. Nearly all are tracking redirects; the
+// exact address of any link is in get-mail-message.
+const MAX_KEPT_URL = 300;
+// Query parameters that only identify the recipient or campaign to a tracker:
+// ones defined by analytics and ad platforms, valid on any site, and LinkedIn's
+// own, only on LinkedIn links.
+const TRACKING_PARAM = /^(utm_[a-z_]+|mc_cid|mc_eid|_hsenc|_hsmi|__hstc|__hssc|__hsfp|mkt_tok|gclid|dclid|fbclid|msclkid|yclid|igshid)$/i;
+const LINKEDIN_TRACKING_PARAM = /^(trackingid|refid|lipi|midtoken|midsig|trk|trkemail)$/i;
 
+// Reply headers. The "On <date>, <name> wrote:" forms must contain a digit (the
+// date), so text that merely mentions the phrase is not taken for one.
 const QUOTE_START = [
   /^On .{1,300}wrote:\s*$/i,                              // Gmail/Apple: On <date>, <name> wrote:
   /^-{2,}\s*Original Message\s*-{2,}/i,                   // Outlook classic
-  /^_{10,}\s*$/,                                           // Outlook separator before From:/Sent:
   /^Le .{1,300}a écrit\s*:\s*$/i, /^Am .{1,300}schrieb .{0,200}:\s*$/i,
 ];
+const DATED = [true, false, true, true];
+const isReplyHeader = (l) => QUOTE_START.some((r, k) => r.test(l) && (!DATED[k] || /\d/.test(l)));
 const HEADER_FROM = /^\*?From:\*?\s+\S/i;
 const HEADER_NEXT = /^\*?(Sent|Date|To|Subject):\*?\s/i;
+const SEPARATOR = /^_{10,}\s*$/; // Outlook's line above a From:/Sent: block
+
+// "From: ..." followed by at least two of Sent/Date/To/Subject: a quoted message's header block.
+function isHeaderBlock(lines, i) {
+  const l = (lines[i] || '').trim();
+  if (l.length > 2000 || !HEADER_FROM.test(l)) return false;
+  let k = 0;
+  for (let j = i + 1; j < Math.min(lines.length, i + 6); j++) if (lines[j].length < 2000 && HEADER_NEXT.test(lines[j].trim())) k++;
+  return k >= 2;
+}
 
 function quoteStart(lines) {
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i].trim();
     if (l.length > 2000) continue; // header lines are short; skip giant lines cheaply
-    if (QUOTE_START.some((r) => r.test(l))) return i;
+    if (isReplyHeader(l)) return i;
+    // Apple Mail quotes the whole history with ">", header included.
+    if (l.startsWith('>') && isReplyHeader(l.replace(/^(?:>[ \t]?){1,20}/, '').trim())) return i;
     // "On Tue, 1 Oct 2026 at 10:00, Paul\n<paul@x.com> wrote:" split over two lines
-    if (/^On .{1,200}/i.test(l) && i + 1 < lines.length && l.length + lines[i + 1].length < 320 && /wrote:\s*$/i.test(lines[i + 1].trim())) return i;
-    if (HEADER_FROM.test(l)) {
-      let k = 0;
-      for (let j = i + 1; j < Math.min(lines.length, i + 6); j++) if (lines[j].length < 2000 && HEADER_NEXT.test(lines[j].trim())) k++;
-      if (k >= 2) return i;
+    if (/^On .{1,200}/i.test(l) && /\d/.test(l) && i + 1 < lines.length && l.length + lines[i + 1].length < 320 && /wrote:\s*$/i.test(lines[i + 1].trim())) return i;
+    if (isHeaderBlock(lines, i)) return i;
+    // The separator counts only above a header block: ticket systems and
+    // receipts use the same line between parts of the message itself.
+    if (SEPARATOR.test(l)) {
+      let j = i + 1;
+      while (j < lines.length && j <= i + 2 && !lines[j].trim()) j++;
+      if (isHeaderBlock(lines, j)) return i;
     }
   }
   return -1;
 }
 
-// The real address behind a link: Outlook/Defender Safe Links wrap it.
+// Proofpoint URL Defense v3: the real address sits between "__" markers, with
+// some characters replaced by "*" (one) or "**<c>" (a run) and listed, base64
+// encoded, after the ";".
+const RUN_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+function unwrapUrlDefenseV3(u) {
+  const m = /^https:\/\/urldefense\.com\/v3\/__(.{1,4096}?)__;([A-Za-z0-9_-]{0,4096})!/.exec(u);
+  if (!m) return undefined;
+  const replaced = [...Buffer.from(m[2], 'base64url').toString('utf8')];
+  let next = 0;
+  let out = m[1].replace(/\*\*(.)|\*/g, (tok, run) => {
+    const n = run === undefined ? 1 : RUN_CHARS.indexOf(run) + 2;
+    if (n < 1) return tok;
+    const r = replaced.slice(next, next + n).join('');
+    next += n;
+    return r;
+  });
+  out = out.replace(/^(https?:)\/(?!\/)/i, '$1//');
+  return new URL(out).href;
+}
+
+// One wrapper removed, or undefined when the link is not wrapped.
+function unwrapOnce(u) {
+  const url = new URL(u);
+  const host = url.hostname.toLowerCase();
+  if (/(^|\.)safelinks\.protection\.outlook\.com$/.test(host)) {
+    const w = url.searchParams.get('url');
+    return w ? new URL(w).href : undefined;
+  }
+  if (host === 'urldefense.com') return unwrapUrlDefenseV3(u);
+  if (host === 'urldefense.proofpoint.com') {
+    // v2: "-" stands for "%" and "_" for "/" in the encoded address.
+    const w = url.searchParams.get('u');
+    return w ? new URL(decodeURIComponent(w.replace(/_/g, '/').replace(/-/g, '%'))).href : undefined;
+  }
+  if (/^(www\.)?google\.[a-z.]{2,6}$/.test(host) && url.pathname === '/url') {
+    const w = url.searchParams.get('q') ?? url.searchParams.get('url');
+    return w && /^https?:\/\//i.test(w) ? new URL(w).href : undefined;
+  }
+  return undefined;
+}
+
+// The real address behind a link. Mail security and webmail wrap links in their
+// own redirect (Outlook/Defender Safe Links, Proofpoint URL Defense, Google's
+// /url redirect), sometimes one inside another. Tracking parameters are then dropped.
 function unwrap(u) {
+  let real = u;
+  for (let i = 0; i < 3; i++) {
+    let next;
+    try { next = unwrapOnce(real); } catch { next = undefined; }
+    if (!next || next === real) break;
+    real = next;
+  }
   try {
-    const url = new URL(u);
-    const wrapped = url.searchParams.get('url');
-    if (/(^|\.)safelinks\.protection\.outlook\.com$/i.test(url.hostname) && wrapped) return new URL(wrapped).href;
-    return u;
-  } catch { return u; }
+    const r = new URL(real);
+    const linkedIn = /(^|\.)linkedin\.com$/i.test(r.hostname);
+    let dropped = false;
+    for (const k of [...r.searchParams.keys()]) if (TRACKING_PARAM.test(k) || (linkedIn && LINKEDIN_TRACKING_PARAM.test(k))) { r.searchParams.delete(k); dropped = true; }
+    return dropped ? r.href : real;
+  } catch { return real; }
 }
 function hostOf(u) {
   try { return new URL(u).hostname.replace(/^www\./, '') || 'link'; } catch { return 'link'; }
@@ -118,16 +200,18 @@ function splitUrlTail(u) {
   return [u.slice(0, end), u.slice(end)];
 }
 
+function isImageUrl(u) {
+  try { return /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i.test(new URL(u).pathname); } catch { return false; }
+}
+
 function cleanLinks(t) {
-  // "[<image url>]": an image placeholder whose only content is its address.
-  t = t.replace(/\[[ \t]{0,20}https?:\/\/[^\s<>"'[\]⟦⟧]{1,4096}[ \t]{0,20}\]/gi, '');
   // Graph's text conversion writes anchors as "label<https://...>"; bare URLs also
   // occur. Every quantifier is bounded and the delimiters are excluded from the
   // runs, so a hostile body stays linear.
   t = t.replace(/<((?:https?|mailto|tel):[^<>\s]{1,4096})>/gi, (m, u) => {
     if (/^(mailto|tel):/i.test(u)) return m;
     const shown = showLink(u);
-    return shown.startsWith(MARK_OPEN) ? ` ${shown}` : ` <${shown}>`;
+    return shown.startsWith(MARK_OPEN) ? shown : `<${shown}>`;
   });
   t = t.replace(/(^|[^<])\b(https?:\/\/[^\s<>"'[\]⟦⟧]{1,4096})/gi, (m, pre, raw) => {
     const [u, tail] = splitUrlTail(raw);
@@ -136,36 +220,28 @@ function cleanLinks(t) {
   return t;
 }
 
-const LINK_TOKEN = /<?https?:\/\/[^\s<>]{1,4096}>?|⟦link: [^⟦⟧\n]{1,300}⟧/g;
+// "[<image url>]": Graph's text for an image is its address in brackets. Only an
+// address that names an image file is removed, nothing around it; other bracketed
+// links stay.
+const IMAGE_PLACEHOLDER = /\[[ \t]{0,20}(https?:\/\/[^\s<>"'[\]⟦⟧]{1,4096})[ \t]{0,20}\]/gi;
 
 function cleanText(raw, opts = {}) {
   const t = String(raw || '')
-    .replace(/\r\n?/g, '\n')
-    .replace(/[​-‍⁠﻿­]|͏/g, '')   // zero-width / preheader padding
-    .replace(/[   ]/g, ' ')
-    .replace(/⟦/g, '[').replace(/⟧/g, ']');          // marker brackets cannot come from the body
+    .replace(/\r\n?/g, '\n') // line endings
+    // Preheader padding: runs of invisible characters (a single one, such as a soft
+    // hyphen in a word, is part of the text and stays).
+    .replace(/(?:(?:[\u200b-\u200d\u2060\ufeff\u00ad]|\u034f)[ \t\u00a0\u2007\u202f]*){3,}/g, ' ')
+    .replace(/⟦/g, '[').replace(/⟧/g, ']'); // the marker brackets are reserved: body text cannot make a marker
   let lines = t.split('\n');
-
   if (!opts.keepQuoted) {
     const q = quoteStart(lines);
-    if (q >= 0 && lines.slice(0, q).join('').trim()) lines = lines.slice(0, q);
-    lines = lines.filter((l) => !/^\s*>/.test(l));
+    if (q >= 0 && lines.slice(0, q).join('').trim()) {
+      // The text up to the header, exactly: its last line break included.
+      lines = lines.slice(0, q).concat('');
+    }
   }
-
-  lines = cleanLinks(lines.join('\n')).split('\n').map((l) => l.replace(/[ \t]+/g, ' ').trim());
-  // Runs of lines that are nothing but links (nav bars, social icons) collapse to
-  // one line of their distinct links: every link stays, the line clutter goes.
-  const out = [];
-  let run = null;
-  for (const l of lines) {
-    const links = l.match(LINK_TOKEN);
-    const linkOnly = links && l.replace(LINK_TOKEN, '').replace(/[\s|•·\-–]/g, '') === '';
-    if (linkOnly) {
-      if (!run) { run = []; out.push(run); }
-      for (const k of links) if (!run.includes(k)) run.push(k);
-    } else { run = null; out.push(l); }
-  }
-  return out.map((x) => (Array.isArray(x) ? x.join(' ') : x)).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  // Everything else, whitespace included, is left as the message has it.
+  return cleanLinks(lines.join('\n').replace(IMAGE_PLACEHOLDER, (m, u) => (isImageUrl(u) ? '' : m)));
 }
 
 // ---- requests and output ----------------------------------------------------

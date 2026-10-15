@@ -67,7 +67,7 @@ async function startUpstream(opts = {}) {
       if (rpc.method === 'tools/list') return reply({ tools: [{ name: 'list-mail-messages', inputSchema: { type: 'object' } }, { name: 'get-upload-url', inputSchema: { type: 'object' } }] });
       if (rpc.method === 'tools/call') {
         const { name, arguments: args = {} } = rpc.params;
-        const msg = (id) => ({ id, subject: `S-${id}`, body: { contentType: 'text', content: `Body ${id}\n\nOn Mon, P wrote:\n> old` }, from: { emailAddress: { address: 'p@example.com' } } });
+        const msg = (id) => ({ id, subject: `S-${id}`, body: { contentType: 'text', content: `Body ${id}\n\nOn Mon, 6 Oct 2026, P wrote:\n> old` }, from: { emailAddress: { address: 'p@example.com' } } });
         if (name === 'get-mail-message') {
           if (String(args.messageId).startsWith('MISSING')) return text('Microsoft Graph API error: 404 Not Found - {"error":{"code":"ErrorItemNotFound","message":"x"}}', true);
           return text(msg(args.messageId));
