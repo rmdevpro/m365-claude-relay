@@ -17,12 +17,19 @@
 // cleaner reads at most MAX_INPUT_CHARS per message (beyond that the message is
 // marked truncated), and a link marker cannot be forged from body text (the
 // marker brackets are neutralised in the input). Nothing is cut silently: text
-// is complete unless maxChars or the input cap applied (truncated: true), and a
-// response over the limit is refused whole with advice to narrow the query.
+// is complete unless maxChars (default 3,000) or the input cap applied
+// (truncated: true), and a response over the limit is refused whole with advice
+// to narrow the query.
 
 const MAX_IDS = 20;
 const MAX_TOP = 20;
 const MAX_INPUT_CHARS = 300_000;
+// Each message's text is cut here unless the caller asks for more. On a real mailbox
+// (649 messages) the median cleaned message is about 1,000 characters and the worst
+// page of 20 at this cap about 68,000, inside the response limit with room for long
+// recipient lists. Ticket systems that repeat their history in every update put the
+// newest entry first, so the cut keeps it.
+const DEFAULT_MAX_CHARS = 3_000;
 const SELECT = 'id,subject,from,toRecipients,ccRecipients,receivedDateTime,hasAttachments,body';
 
 const TOOL_NAME = 'read-mail-text';
@@ -37,7 +44,8 @@ const TOOL_DEF = {
     'whitespace) is left as the message has it; line endings become \\n and ⟦ ⟧ in the body itself appear as [ ]. ' +
     'Use get-mail-message for the raw body or the quoted thread. Give ' +
     'messageIds, or folderId with optional top and filter or search (newest first). ' +
-    'Text is cut only when maxChars is set or a message exceeds 300,000 characters (truncated: true). If the whole result would ' +
+    'Each message is cut to maxChars characters (default 3,000; marked truncated: true): pass a larger maxChars, up to ' +
+    '300,000, for the whole of a long message; a body over 300,000 characters is cleaned only that far. If the whole result would ' +
     'be too large the call fails, naming the largest messages: narrow it with fewer messages, a filter, or maxChars.',
   inputSchema: {
     type: 'object',
@@ -47,7 +55,7 @@ const TOOL_DEF = {
       top: { type: 'integer', minimum: 1, maximum: MAX_TOP, description: `With folderId: how many messages, newest first (default and max ${MAX_TOP}).` },
       filter: { type: 'string', description: "With folderId: OData $filter, e.g. receivedDateTime ge 2026-10-01T00:00:00Z or from/emailAddress/address eq 'a@b.com'." },
       search: { type: 'string', description: 'With folderId: KQL search, e.g. from:paul subject:"quarterly report". Cannot be combined with filter.' },
-      maxChars: { type: 'integer', minimum: 1, description: 'Optional: cut each message text to this many characters (marked truncated). Unset = the full cleaned text, except that a body over 300,000 characters is cleaned only that far (also marked truncated).' },
+      maxChars: { type: 'integer', minimum: 1, maximum: MAX_INPUT_CHARS, description: 'Cut each message text to this many characters (marked truncated). Default 3,000; pass up to 300,000 for the whole of a long message (a body over 300,000 characters is cleaned only that far, also marked truncated).' },
     },
     additionalProperties: false,
   },
@@ -254,7 +262,7 @@ function validate(args) {
   const hasIds = a.messageIds !== undefined;
   const hasFolder = a.folderId !== undefined;
   if (hasIds === hasFolder) throw new ToolError('give messageIds or folderId (exactly one)');
-  if (a.maxChars !== undefined && !(Number.isInteger(a.maxChars) && a.maxChars > 0)) throw new ToolError('maxChars must be a positive integer');
+  if (a.maxChars !== undefined && !(Number.isInteger(a.maxChars) && a.maxChars > 0 && a.maxChars <= MAX_INPUT_CHARS)) throw new ToolError(`maxChars must be an integer from 1 to ${MAX_INPUT_CHARS}`);
   if (hasIds) {
     if (!Array.isArray(a.messageIds) || !a.messageIds.length || a.messageIds.some((x) => typeof x !== 'string' || !x.trim())) throw new ToolError('messageIds must be a non-empty list of ids');
     if (a.messageIds.length > MAX_IDS) throw new ToolError(`at most ${MAX_IDS} messageIds per call`);
@@ -276,16 +284,25 @@ function addr(r) {
   return e.name && e.name !== e.address ? `${e.name} <${e.address}>` : e.address || e.name || '';
 }
 
+// The first n characters (UTF-16 code units), never splitting a surrogate pair: an
+// emoji at the boundary is left out rather than cut in half.
+function cutText(s, n) {
+  if (s.length <= n) return s;
+  const c = s.charCodeAt(n - 1);
+  return s.slice(0, c >= 0xd800 && c <= 0xdbff ? n - 1 : n);
+}
+
 function toEntry(m, a) {
   const subject = m.subject || '';
   // A forward's quoted part IS the content: keep it.
   const keepQuoted = /^\s*(fw|fwd)\s*:/i.test(subject);
   let raw = String((m.body && m.body.content) || '');
   let truncated = false;
-  if (raw.length > MAX_INPUT_CHARS) { raw = raw.slice(0, MAX_INPUT_CHARS); truncated = true; }
+  if (raw.length > MAX_INPUT_CHARS) { raw = cutText(raw, MAX_INPUT_CHARS); truncated = true; }
   let text = cleanText(raw, { keepQuoted });
   const chars = text.length;
-  if (a.maxChars && chars > a.maxChars) { text = text.slice(0, a.maxChars); truncated = true; }
+  const maxChars = a.maxChars || DEFAULT_MAX_CHARS;
+  if (chars > maxChars) { text = cutText(text, maxChars); truncated = true; }
   return {
     id: m.id, from: addr(m.from), to: (m.toRecipients || []).map(addr), cc: (m.ccRecipients || []).map(addr),
     subject, received: m.receivedDateTime, hasAttachments: !!m.hasAttachments, text, chars, truncated,
@@ -332,9 +349,9 @@ async function readMailText(args, callTool, maxResponseChars) {
     throw new ToolError(
       `Response would be ${json.length.toLocaleString('en-US')} characters (limit ${maxResponseChars.toLocaleString('en-US')}). ` +
       `Largest: ${largest}. Narrow the query (fewer messages via top, a filter such as a date range or sender, ` +
-      'specific messageIds) or set maxChars to shorten each message.');
+      'specific messageIds) or set a smaller maxChars.');
   }
   return out;
 }
 
-module.exports = { TOOL_NAME, TOOL_DEF, ToolError, cleanText, readMailText, MAX_IDS, MAX_TOP, MAX_INPUT_CHARS };
+module.exports = { TOOL_NAME, TOOL_DEF, ToolError, cleanText, readMailText, MAX_IDS, MAX_TOP, MAX_INPUT_CHARS, DEFAULT_MAX_CHARS };

@@ -50,7 +50,7 @@ Sources (September 2026): [Microsoft 365 connector](https://claude.com/docs/conn
      -e MS365_MCP_ATTACHMENT_URL_BASE=https://relay.example.com \
      -e MS365_MCP_ATTACHMENT_URL_KEY=<32+ random hex> \
      -e MS365_MCP_ALLOWED_SCOPES="User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Contacts.ReadWrite MailboxSettings.ReadWrite Files.ReadWrite" \
-     ghcr.io/rmdevpro/m365-claude-relay:1.4.2
+     ghcr.io/rmdevpro/m365-claude-relay:1.4.3
    ```
 
    Work tenant: add `-e MS365_MCP_ORG_MODE=true`. `https://relay.example.com/` answers
@@ -129,7 +129,7 @@ The only custom code is `gate.js` (about 150 lines) with `mail-text.js`. It is a
 
 | Piece | Why | Retire when |
 |---|---|---|
-| `read-mail-text`: up to 20 messages as text with only the bulk junk removed — runs of invisible padding, image placeholders (a bracketed image-file address) and quoted reply history from its header down (forwards keep theirs); links kept (Safe Links, Proofpoint and Google redirects unwrapped, tracking parameters dropped; only addresses still over 300 characters shortened to `⟦link: domain⟧`). Everything else — signatures, footers, whitespace — is left as the message has it; line endings become `\n` and `⟦ ⟧` in the body itself appear as `[ ]` (reserved for link markers). A body over 300,000 characters is cleaned only that far (`truncated: true`). Hardened for hostile bodies (linear-time cleaning, unforgeable link markers); a result over the limit is refused whole with advice to narrow it | Softeria returns each body with all of that clutter (20 inbox messages ≈ 280,000 characters vs ≈ 70,000 on a real mailbox). Essential for working through a large mailbox | upstream PR Softeria#708, then the gate is removed and the image runs Softeria alone |
+| `read-mail-text`: up to 20 messages as text with only the bulk junk removed — runs of invisible padding, image placeholders (a bracketed image-file address) and quoted reply history from its header down (forwards keep theirs); links kept (Safe Links, Proofpoint and Google redirects unwrapped, tracking parameters dropped; only addresses still over 300 characters shortened to `⟦link: domain⟧`). Everything else — signatures, footers, whitespace — is left as the message has it; line endings become `\n` and `⟦ ⟧` in the body itself appear as `[ ]` (reserved for link markers). Each message is cut to `maxChars` characters, default 3,000 (`truncated: true`; pass up to 300,000 for a whole long message), so a page of 20 fits the result limit. Hardened for hostile bodies (linear-time cleaning, unforgeable link markers); a result over the limit is refused whole with advice to narrow it | Softeria returns each body with all of that clutter (20 inbox messages ≈ 280,000 characters vs ≈ 70,000 on a real mailbox). Essential for working through a large mailbox | upstream PR Softeria#708, then the gate is removed and the image runs Softeria alone |
 
 The pass-through:
 - **Changes nothing else.** Requests and answers stream through untouched; it appends the client address to `X-Forwarded-For`, as any proxy does.

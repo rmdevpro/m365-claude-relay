@@ -1,7 +1,7 @@
 // node --test m365-relay/test/
 const test = require('node:test');
 const assert = require('node:assert');
-const { cleanText, readMailText, ToolError, MAX_INPUT_CHARS } = require('../mail-text');
+const { cleanText, readMailText, ToolError, MAX_INPUT_CHARS, DEFAULT_MAX_CHARS } = require('../mail-text');
 
 const L = (d) => `⟦link: ${d}⟧`;
 
@@ -203,16 +203,39 @@ test('forwards keep their quoted content, even below a signature', async () => {
   assert.match(m.text, /The terms are attached\./);
 });
 
-test('maxChars cuts and marks truncated; unset returns everything', async () => {
+test('each message is cut to 3,000 characters by default; a larger maxChars returns more', async () => {
   const long = 'word '.repeat(5000).trim();
-  const callTool = async () => ({ value: [msg('A', 'long', long)] });
-  const [full] = await readMailText({ folderId: 'inbox' }, callTool, 80000);
-  assert.strictEqual(full.text.length, long.length);
+  const callTool = async () => ({ value: [msg('A', 'long', long), msg('B', 'short', 'Hi')] });
+  const [byDefault, short] = await readMailText({ folderId: 'inbox' }, callTool, 80000);
+  assert.strictEqual(byDefault.text, long.slice(0, DEFAULT_MAX_CHARS));
+  assert.strictEqual(byDefault.chars, long.length);
+  assert.strictEqual(byDefault.truncated, true);
+  assert.strictEqual(short.text, 'Hi');
+  assert.strictEqual(short.truncated, false);
+  const [full] = await readMailText({ folderId: 'inbox', maxChars: 300000 }, callTool, 80000);
+  assert.strictEqual(full.text, long);
   assert.strictEqual(full.truncated, false);
   const [cut] = await readMailText({ folderId: 'inbox', maxChars: 100 }, callTool, 80000);
   assert.strictEqual(cut.text.length, 100);
-  assert.strictEqual(cut.chars, long.length);
   assert.strictEqual(cut.truncated, true);
+});
+
+test('a character is never cut in half at the default cut or the input cap', async () => {
+  const lone = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+  const atDefault = 'x'.repeat(DEFAULT_MAX_CHARS - 1) + '\u{1F600}tail';
+  const [a] = await readMailText({ folderId: 'inbox' }, async () => ({ value: [msg('A', 'a', atDefault)] }), 80000);
+  assert.strictEqual(a.text, 'x'.repeat(DEFAULT_MAX_CHARS - 1));
+  assert.strictEqual(a.truncated, true);
+  const atCap = 'x'.repeat(MAX_INPUT_CHARS - 1) + '\u{1F600}tail';
+  const [b] = await readMailText({ folderId: 'inbox', maxChars: MAX_INPUT_CHARS }, async () => ({ value: [msg('B', 'b', atCap)] }), 1000000);
+  assert.strictEqual(lone.test(b.text), false);
+  assert.strictEqual(b.truncated, true);
+});
+
+test('maxChars above 300,000 is refused before any call', async () => {
+  let called = false;
+  await assert.rejects(readMailText({ folderId: 'inbox', maxChars: MAX_INPUT_CHARS + 1 }, async () => { called = true; return { value: [] }; }, 80000), ToolError);
+  assert.strictEqual(called, false);
 });
 
 test('an enormous body is cleaned only up to the input cap and marked truncated', async () => {
@@ -224,7 +247,7 @@ test('an enormous body is cleaned only up to the input cap and marked truncated'
 
 test('oversize response is refused whole with the largest messages and advice', async () => {
   const callTool = async () => ({ value: [msg('A', 'Weekly digest', 'x'.repeat(60000)), msg('B', 'Re: contract', 'y'.repeat(30000)), msg('C', 'short', 'z')] });
-  await assert.rejects(readMailText({ folderId: 'inbox' }, callTool, 80000), (e) => {
+  await assert.rejects(readMailText({ folderId: 'inbox', maxChars: 100000 }, callTool, 80000), (e) => {
     assert.ok(e instanceof ToolError);
     assert.match(e.message, /^Response would be [\d,]+ characters \(limit 80,000\)\. Largest: "Weekly digest" 60,000, "Re: contract" 30,000/);
     assert.match(e.message, /filter/);
@@ -232,6 +255,8 @@ test('oversize response is refused whole with the largest messages and advice', 
     return true;
   });
   assert.strictEqual((await readMailText({ folderId: 'inbox', maxChars: 1000 }, callTool, 80000)).length, 3);
+  // The default cut keeps the same page inside the limit.
+  assert.strictEqual((await readMailText({ folderId: 'inbox' }, callTool, 80000)).length, 3);
 });
 
 test('argument validation: shapes, bounds, empty filter/search refused before any call', async () => {
