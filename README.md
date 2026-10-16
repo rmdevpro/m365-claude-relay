@@ -50,7 +50,7 @@ Sources (September 2026): [Microsoft 365 connector](https://claude.com/docs/conn
      -e MS365_MCP_ATTACHMENT_URL_BASE=https://relay.example.com \
      -e MS365_MCP_ATTACHMENT_URL_KEY=<32+ random hex> \
      -e MS365_MCP_ALLOWED_SCOPES="User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Contacts.ReadWrite MailboxSettings.ReadWrite Files.ReadWrite" \
-     ghcr.io/rmdevpro/m365-claude-relay:1.4.3
+     ghcr.io/rmdevpro/m365-claude-relay:1.4.4
    ```
 
    Work tenant: add `-e MS365_MCP_ORG_MODE=true`. `https://relay.example.com/` answers

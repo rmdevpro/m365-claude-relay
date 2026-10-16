@@ -1,7 +1,7 @@
 // node --test m365-relay/test/
 const test = require('node:test');
 const assert = require('node:assert');
-const { cleanText, readMailText, ToolError, MAX_INPUT_CHARS, DEFAULT_MAX_CHARS } = require('../mail-text');
+const { cleanText, isForwardSubject, readMailText, ToolError, MAX_INPUT_CHARS, DEFAULT_MAX_CHARS } = require('../mail-text');
 
 const L = (d) => `⟦link: ${d}⟧`;
 
@@ -35,6 +35,31 @@ test('text that only looks like quoting is kept: ">" lines and undated "On ... w
   assert.strictEqual(cleanText(doc), doc);
   // Apple Mail quotes the whole history with ">", its header included.
   assert.strictEqual(cleanText('Top reply\n\n> On Sep 21, 2026, at 12:10 AM, J <j@x.example> wrote:\n>\n> old'), 'Top reply\n\n');
+});
+
+test('forwards are recognised in other languages and behind tags', () => {
+  for (const subject of [
+    'FW: x', 'Fw: x', 'Fwd: x', 'FWD : x', 'VS: x', 'VB: x', 'WG: x', 'TR: x', 'TRS: x', 'RV: x',
+    'I: x', 'ENC: x', 'Doorst: x', 'VL: x', 'ED: x', 'FS: x', 'PD: x', 'YML: x', '\u0130LT: x',
+    'Tov\u00e1bb\u00edt\u00e1s: x', 'P\u0101rs.: x', '\u03a0\u03a1\u0398: x', '\u8f6c\u53d1: x',
+    '\u8f6c\u53d1\uff1ax', '\u8f49\u5bc4: x', '\u05d4\u05d5\u05e2\u05d1\u05e8: x',
+    '\u05d4\u05e2\u05d1\u05e8\u05d4: x', '\u0625\u0639\u0627\u062f\u0629 \u062a\u0648\u062c\u064a\u0647: x',
+    '\u0bae\u0bc1\u0ba9\u0bcd\u0ba9\u0ba9\u0bc1\u0baa\u0bcd\u0baa\u0bc1: x', '[EXTERNAL] FW: x', '[EXT] [x] Fwd: x',
+    // decomposed (NFD) spellings
+    'Tova\u0301bbi\u0301ta\u0301s: x', 'Pa\u0304rs.: x', 'I\u0307LT: x',
+  ]) {
+    assert.strictEqual(isForwardSubject(subject), true, subject);
+  }
+  for (const subject of ['Re: x', 'RE: FW: x', 'AW: x', 'SV: x', 'Forward: x', 'Info: x', 'x FW: y']) {
+    assert.strictEqual(isForwardSubject(subject), false, subject);
+  }
+});
+
+test('history under an explicit forward marker is kept, whatever the subject', () => {
+  const gmail = 'See below.\n\n---------- Forwarded message ---------\nFrom: A <a@x.example>\nDate: Mon, Oct 5, 2026\nSubject: Plan\nTo: B\n\nThe plan.';
+  assert.strictEqual(cleanText(gmail), gmail);
+  const apple = 'Ok.\n\nBegin forwarded message:\n\nFrom: A\nSubject: x\nDate: 5 Oct 2026\nTo: B\n\nBody';
+  assert.strictEqual(cleanText(apple), apple);
 });
 
 test('history is kept when nothing precedes it', () => {
@@ -198,9 +223,13 @@ test('folder mode: list-mail-folder-messages with top, filter or search passed t
 });
 
 test('forwards keep their quoted content, even below a signature', async () => {
-  const callTool = async () => ({ value: [msg('A', 'FW: contract', 'FYI\n-- \nJ\n\nFrom: Paul\nSent: Mon\nTo: J\nSubject: contract\n\nThe terms are attached.')] });
-  const [m] = await readMailText({ folderId: 'inbox' }, callTool, 80000);
+  const callTool = async () => ({ value: [msg('A', 'FW: contract', 'FYI\n-- \nJ\n\nFrom: Paul\nSent: Mon\nTo: J\nSubject: contract\n\nThe terms are attached.'),
+    msg('B', 'VS: kontrakt', 'FYI\n\nFrom: Paul\nSent: Mon\nTo: J\nSubject: kontrakt\n\nVilkårene er vedlagt.'),
+    msg('C', 'Tova\u0301bbi\u0301ta\u0301s: contract', 'FYI\n\nFrom: A\nSent: now\nTo: B\nSubject: old\n\nforward content')] });
+  const [m, vs, nfd] = await readMailText({ folderId: 'inbox' }, callTool, 80000);
+  assert.match(nfd.text, /forward content/);
   assert.match(m.text, /The terms are attached\./);
+  assert.match(vs.text, /Vilkårene er vedlagt\./);
 });
 
 test('each message is cut to 3,000 characters by default; a larger maxChars returns more', async () => {
