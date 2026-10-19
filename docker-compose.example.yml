@@ -1,0 +1,9 @@
+# Example: Softeria's image, configured as a Claude relay. Put TLS in front of port 3000.
+services:
+  m365-relay:
+    image: ghcr.io/softeria/ms-365-mcp-server@sha256:0e063c40f809448c184d55597db2b7a879a14d279f11c9cde881e411fbe056ec  # 0.170.2
+    command: ["--http", "0.0.0.0:3000", "--enable-attachment-urls"]
+    env_file: relay.env
+    ports: ["127.0.0.1:3000:3000"]
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
