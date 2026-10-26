@@ -54,7 +54,7 @@ content) to stderr. Point the platform's log collection at it and set retention.
 1. **Connector:** Settings > Connectors > Add custom connector. URL `https://<relay host>/mcp`; Advanced > OAuth Client ID = the app registration id.
 2. **Code execution:** the relay host must be on the allowed domains for code execution (Team/Enterprise: an org setting). Claude moves files with `curl` in its sandbox; without this, mail works but attachments do not. Claude's Free plan has no allowed-domains list, so it cannot move files through the relay.
 3. **Tool permissions:** read-only tools can be *Always allow*; leave send, delete and share tools on *Needs approval*. Block anything the organisation does not want (see [tools.md](tools.md)).
-4. **Skill:** upload `claude-skill/m365-relay/SKILL.md`.
+4. **Skill:** upload `claude-skill/microsoft-365/SKILL.md` (and optionally `claude-skill/email-management`).
 
 ## 4. Verify from outside (no account needed)
 

@@ -1,17 +1,17 @@
 ---
 name: email-management
-description: Use when the user asks to triage, clean up or work through their inbox (or several mailboxes) end to end. The top-level process for a triage pass; it uses the user's triage rules (triage-rules.md in this skill) and the mailbox skill for each mailbox, such as m365-email.
+description: Use when the user asks to triage, clean up or work through their inbox (or several mailboxes) end to end. The top-level process for a triage pass; it uses the user's triage rules (triage-rules.md in this skill) and the skill for each mailbox, such as microsoft-365.
 ---
 
 # Email management
 
-The process for working through the user's mail on request. It carries the **process** only. How to talk to each mailbox lives in that mailbox's skill (for Microsoft 365, `m365-email`). How to classify each message lives in `triage-rules.md`, in this skill's folder.
+The process for working through the user's mail on request. It carries the **process** only. How to work each mailbox lives in that mailbox's skill (for Microsoft 365, `microsoft-365`). How to classify each message lives in `triage-rules.md`, in this skill's folder.
 
 Long conversations lose detail. **Re-read this skill and `triage-rules.md` in full before every triage pass**, and follow them as written.
 
 ## The pieces
 
-- **Mailbox skills.** One per kind of mailbox. Use `m365-email` for a Microsoft 365 / Outlook mailbox through the M365 relay connector. Load the one you need when you start that mailbox.
+- **Mailbox skills.** One per kind of mailbox. Use `microsoft-365` for a Microsoft 365 / Outlook mailbox through the M365 Claude Relay connector. Load the one you need when you start that mailbox.
 - **Triage rules** (`triage-rules.md`). The user's own classification policy: which kinds of mail are kept, archived, filed, deleted or handed elsewhere. It starts as a template and grows as the user corrects you.
 
 ## The process is fixed; the rules are the user's

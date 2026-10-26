@@ -13,10 +13,10 @@ Works with Claude web/desktop custom connectors (Free, Pro, Team, Enterprise).
 3. **Code execution domain** — Settings → Capabilities → Code execution → *Additional allowed
    domains*: add the relay host. Attachments and files move through one-time links that Claude's
    sandbox fetches; without this, downloads/uploads fail.
-4. **Skills** — Customize → Skills → Upload skill → `claude-skill/m365-relay/SKILL.md`. It teaches
-   Claude the attachment link workflow, forwarding, calendar attachments and when to stop.
-   Optional, for more depth: `m365-email`, `m365-calendar`, `m365-contacts`, and `email-management`
-   (inbox triage; upload its folder with `triage-rules.md` and make the rules your own).
+4. **Skills** — Customize → Skills → Upload skill → `claude-skill/microsoft-365/SKILL.md`. It teaches
+   Claude the connector: mail, calendar, contacts, OneDrive, the attachment link workflow and when to
+   stop and ask. Optional: `claude-skill/email-management` (inbox triage; upload the folder with
+   `triage-rules.md` and make the rules your own).
 5. **Tool permissions** — connector → Tool permissions. Each tool is *Always allow*, *Needs
    approval* or *Blocked*. Recommended: reads, drafts and reversible edits → Always allow; anything
    that sends, deletes, shares/delegates, or changes mail rules or mailbox settings → Needs approval;
