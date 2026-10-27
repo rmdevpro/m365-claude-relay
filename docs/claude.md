@@ -15,8 +15,8 @@ Works with Claude web/desktop custom connectors (Free, Pro, Team, Enterprise).
    sandbox fetches; without this, downloads/uploads fail.
 4. **Skills** — Customize → Skills → Upload skill → `claude-skill/microsoft-365/SKILL.md`. It teaches
    Claude the connector: mail, calendar, contacts, OneDrive, the attachment link workflow and when to
-   stop and ask. Optional: `claude-skill/email-management` (inbox triage; upload the folder with
-   `triage-rules.md` and make the rules your own).
+   stop and ask. Optional: `claude-skill/email-management` (inbox triage; upload the whole folder. The first
+   time, Claude interviews the user and saves their rules to memory, so memory must be on).
 5. **Tool permissions** — connector → Tool permissions. Each tool is *Always allow*, *Needs
    approval* or *Blocked*. Recommended: reads, drafts and reversible edits → Always allow; anything
    that sends, deletes, shares/delegates, or changes mail rules or mailbox settings → Needs approval;
