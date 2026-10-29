@@ -1,7 +1,7 @@
 # Deploy and verify
 
 A checklist for putting the relay into an organisation's own tenant and proving it works before
-anyone relies on it. Every check here was run against the public demo instance on Softeria 0.170.2.
+anyone relies on it. Every check here was run against the public demo instance on Softeria 0.170.2; the image below is our build of 0.176.0 (see the README), verified on our own Azure test deployment.
 
 ## 1. Before you start
 
@@ -18,9 +18,9 @@ read, triage, draft, send, attachments). Add `Calendars.ReadWrite`, `Contacts.Re
 
 ## 2. Run the container
 
-Softeria's image, unmodified, one replica, behind HTTPS on port 3000:
+Our build of Softeria's server, one replica, behind HTTPS on port 3000:
 
-- **Image:** `ghcr.io/softeria/ms-365-mcp-server@sha256:0e063c40f809448c184d55597db2b7a879a14d279f11c9cde881e411fbe056ec` (0.170.2; public, multi-arch, no pull credentials).
+- **Image:** `ghcr.io/rmdevpro/ms-365-mcp-server@sha256:456eb842902d32a5b95cdaff2f0db523dffa89af0abb11e4698c6af9c03bcf88` (Softeria 0.176.0 + Softeria#775 and #777; public, no pull credentials).
 - **Arguments:** `--http 0.0.0.0:3000 --enable-attachment-urls`.
 - **Environment:** [`relay.env.example`](../relay.env.example), with the client id, tenant id, host and the two secrets filled in. Every line is explained in the README.
 
@@ -31,7 +31,7 @@ Azure Container Apps example (adapt names; secrets via `secretref`; the remainin
 
 ```bash
 az containerapp create -g <rg> -n m365-relay --environment <env> \
-  --image ghcr.io/softeria/ms-365-mcp-server@sha256:0e063c40f809448c184d55597db2b7a879a14d279f11c9cde881e411fbe056ec \
+  --image ghcr.io/rmdevpro/ms-365-mcp-server@sha256:456eb842902d32a5b95cdaff2f0db523dffa89af0abb11e4698c6af9c03bcf88 \
   --args "--http" "0.0.0.0:3000" "--enable-attachment-urls" \
   --ingress external --target-port 3000 --min-replicas 1 --max-replicas 1 \
   --secrets client-secret=<secret> attach-key=<hex> \

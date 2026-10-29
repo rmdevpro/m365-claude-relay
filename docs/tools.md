@@ -1,6 +1,6 @@
 # Tool reference and recommended Claude permissions
 
-The configuration in `relay.env.example` (Softeria 0.170.2) is **scope-led**: users consent to `User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Contacts.ReadWrite MailboxSettings.ReadWrite Files.ReadWrite`, and Softeria exposes every tool whose required scopes those cover: **138** on a personal account, 139 on a work tenant. Scopes are set by the operator (`MS365_MCP_ALLOWED_SCOPES`). Tools are not picked by hand; the only exceptions are tools replaced by better ones (`ENABLED_TOOLS`): `download-bytes`/`download-bytes-to-file`/`get-mail-attachment-content` (excluded; `get-download-url` replaces them), the four base64/upload-session attachment writes for mail and events (excluded; `get-upload-url` replaces them) and `graph-batch` (excluded; it would bypass those).
+The configuration in `relay.env.example` (our build of Softeria 0.176.0) is **scope-led**: users consent to `User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Contacts.ReadWrite MailboxSettings.ReadWrite Files.ReadWrite`, and Softeria exposes every tool whose required scopes those cover: **139** on a personal account, 140 on a work tenant. Scopes are set by the operator (`MS365_MCP_ALLOWED_SCOPES`). Tools are not picked by hand; the only exceptions are tools replaced by better ones (`ENABLED_TOOLS`): `download-bytes`/`download-bytes-to-file`/`get-mail-attachment-content` (excluded; `get-download-url` replaces them), the four base64/upload-session attachment writes for mail and events (excluded; `get-upload-url` replaces them) and `graph-batch` (excluded; it would bypass those).
 
 Columns: **Effect** = what the tool does (Softeria's own description, first sentence). **State**: `Allow` (exposed; Always allow in Claude), `Approve` (exposed; Needs approval in Claude), `Off` (not exposed — the scope isn't granted, the tool is work-tenant only, or the relay replaces it with a better tool; the Why says which). 
 Principle: anything that leaves the mailbox (sends), destroys data, grants someone else access, or commits the user to something (calendar responses) = Approve. Reads, drafts and reversible edits inside the user's own data = Allow.
@@ -34,7 +34,8 @@ Principle: anything that leaves the mailbox (sends), destroys data, grants someo
 | delete-focused-inbox-override | Delete an override specified by its ID | Approve | destroys data |
 | delete-mail-attachment | Delete a mail attachment | Approve | destroys data |
 | delete-mail-folder | Delete the specified mailFolder | Approve | destroys data |
-| delete-mail-message | Delete an Outlook email message by its message ID | Approve | B4 decision |
+| delete-mail-message | Delete a message the way Delete in Outlook does: it moves to Deleted Items | Approve | B4 decision |
+| permanently-delete-mail-message | Delete a message the way Shift+Delete does: it skips Deleted Items and goes to Recoverable Items | Approve | Destroys data; use only when the user asks |
 | delete-mail-rule | Delete the specified messageRule object | Approve | destroys data |
 | download-bytes | Download binary content from Microsoft Graph and return it as base64 | Off | replaced by get-download-url (one-time link); base64 in the conversation fails for real files |
 | forward-mail-message | Forward a message using either JSON or MIME format | Approve | B4 decision |

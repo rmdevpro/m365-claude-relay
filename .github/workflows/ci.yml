@@ -10,7 +10,7 @@ jobs:
   softeria-config:
     runs-on: ubuntu-latest
     env:
-      IMAGE: ghcr.io/softeria/ms-365-mcp-server@sha256:0e063c40f809448c184d55597db2b7a879a14d279f11c9cde881e411fbe056ec
+      IMAGE: ghcr.io/rmdevpro/ms-365-mcp-server@sha256:456eb842902d32a5b95cdaff2f0db523dffa89af0abb11e4698c6af9c03bcf88
     steps:
       - uses: actions/checkout@v4
       - name: Relay configuration with placeholder credentials
@@ -31,9 +31,9 @@ jobs:
           for i in $(seq 30); do curl -sf http://127.0.0.1:3000/ >/dev/null && curl -sf http://127.0.0.1:3001/ >/dev/null && break; sleep 1; done
       - name: Outside checks
         run: ./test/smoke.sh http://127.0.0.1:3000
-      - name: Tool surface (138 with the default scopes, superseded tools excluded)
+      - name: Tool surface (139 with the default scopes, superseded tools excluded)
         run: |
           out=$(python3 test/tools.py http://127.0.0.1:3001/mcp); echo "$out"
-          echo "$out" | grep -q '^138 tools | read-mail-text: True | get-download-url: True | get-upload-url: True | excluded present: \[\]$'
+          echo "$out" | grep -q '^139 tools | read-mail-text: True | get-download-url: True | get-upload-url: True | excluded present: \[\]$'
       - if: failure()
         run: docker logs relay 2>&1 | tail -50

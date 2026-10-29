@@ -6,9 +6,15 @@ contacts and OneDrive through one container you run. Sign-in is Microsoft's own 
 On-Behalf-Of); nothing is stored on disk, and Claude gets exactly the tools your chosen Graph
 scopes cover.
 
-**There is no custom code.** The container is Softeria's own image,
-[`ghcr.io/softeria/ms-365-mcp-server`](https://github.com/Softeria/ms-365-mcp-server) (MIT),
-unmodified. This repository is its configuration for Claude, the deployment and verification
+**The server is Softeria's.** The container is our build of
+[Softeria's ms-365-mcp-server](https://github.com/Softeria/ms-365-mcp-server) (MIT), version 0.176.0,
+with two fixes we have submitted upstream and Softeria has not yet released: no mail content in any
+log, bounded log files and a startup credential check
+([Softeria#775](https://github.com/Softeria/ms-365-mcp-server/pull/775)); and delete that moves mail
+to Deleted Items, as Outlook does, with the old behaviour kept as `permanently-delete-mail-message`
+([Softeria#777](https://github.com/Softeria/ms-365-mcp-server/pull/777)). Source:
+[rmdevpro/ms-365-mcp-server](https://github.com/rmdevpro/ms-365-mcp-server). Once Softeria releases
+both, this repository goes back to Softeria's own image. This repository is its configuration for Claude, the deployment and verification
 guide, the Entra and Claude setup, and a Claude skill. Everything the relay once added is now part
 of Softeria, through our upstream PRs and reports (Softeria#693, #694, #695, #703, #708, #733, #736):
 the token checks and tenant allowlist, attachment upload links, `read-mail-text` and more.
@@ -29,12 +35,12 @@ your own scope list.
 |---|---|---|
 | Email attachments | Not supported: sending, forwarding and drafting with attachments are rejected; Claude can't attach files to drafts | Read any attachment as a real file; send, forward and draft with files up to 150 MB |
 | Calendar event attachments | Not supported | Supported (attendees receive the update) |
-| Tools | A fixed set chosen by Anthropic — about 40 listed in its security guide (7 read/search, the rest write) | 350+ in the catalog; your scope list decides what is exposed (138 with the default scopes, 139 on a work tenant) |
+| Tools | A fixed set chosen by Anthropic — about 40 listed in its security guide (7 read/search, the rest write) | 350+ in the catalog; your scope list decides what is exposed (139 with the default scopes, 140 on a work tenant) |
 | Areas | SharePoint/OneDrive search and file writes, Outlook mail and calendar, Teams chat and calendar | The same areas in depth, plus contacts, calendar sharing/delegation, mailbox rules, OneDrive file operations and Excel workbooks, To Do, OneNote, Planner, groups, rooms, presence, meeting transcripts/recordings, webhook subscriptions (some need additional or work-tenant scopes) |
 | Accounts | Work or school only; personal accounts refused | Work tenants and personal accounts |
 | Consent | Tenant-wide consent to Anthropic's app ("M365 MCP Server for Claude") by a Global Administrator | Your own app registration; users consent to exactly the scopes you list |
 | Where it runs | Anthropic-hosted | A container you run, behind your ingress |
-| Source | Anthropic-operated; source not published | Open source (MIT): Softeria's own image, unmodified, with the configuration in this repository |
+| Source | Anthropic-operated; source not published | Open source (MIT): Softeria's server (our build, two upstream fixes pending release), with the configuration in this repository |
 
 Sources (September 2026): [Microsoft 365 connector](https://claude.com/docs/connectors/microsoft/365),
 [Set up the Microsoft 365 connector](https://support.claude.com/en/articles/12542951-set-up-the-microsoft-365-connector),
@@ -43,11 +49,11 @@ Sources (September 2026): [Microsoft 365 connector](https://claude.com/docs/conn
 ## Quickstart
 
 1. Register an Entra app — [docs/entra.md](docs/entra.md). You need the client id, the tenant id and a secret.
-2. Fill in [`relay.env.example`](relay.env.example) and run Softeria's image with it, one replica, behind your HTTPS ingress on port 3000:
+2. Fill in [`relay.env.example`](relay.env.example) and run the image with it, one replica, behind your HTTPS ingress on port 3000:
 
    ```bash
    docker run -d --name m365-relay --env-file relay.env -p 127.0.0.1:3000:3000 \
-     ghcr.io/softeria/ms-365-mcp-server@sha256:0e063c40f809448c184d55597db2b7a879a14d279f11c9cde881e411fbe056ec \
+     ghcr.io/rmdevpro/ms-365-mcp-server@sha256:456eb842902d32a5b95cdaff2f0db523dffa89af0abb11e4698c6af9c03bcf88 \
      --http 0.0.0.0:3000 --enable-attachment-urls
    ```
 
@@ -57,7 +63,7 @@ Sources (September 2026): [Microsoft 365 connector](https://claude.com/docs/conn
 5. Verify through Claude before anyone relies on it — [docs/deploy-and-verify.md](docs/deploy-and-verify.md).
 
 Change scopes later: edit `MS365_MCP_ALLOWED_SCOPES` and `MS365_MCP_EXTRA_SCOPES`, restart. Update:
-move the image digest to a newer Softeria release, rerun the checks.
+move the image digest to a newer release (Softeria's own, once it includes #775 and #777), rerun the checks.
 
 ## The configuration, line by line
 
@@ -98,8 +104,8 @@ settings (Always allow / Needs approval / Blocked) decide what each user may act
 - `claude-skill/`: Claude skills. `microsoft-365` teaches Claude the connector: mail, calendar, contacts, OneDrive and the file-link workflow, with the ground rules. `email-management` is an optional inbox triage process: a one-time interview builds each user's rules into Claude's memory (`example-rules.md` shows the form), then triage applies them.
 - `test/smoke.sh` (outside checks against any running relay), `test/tools.py` (tool surface); CI runs both against the pinned image on every push and weekly.
 
-Releases up to 1.4.4 shipped an image of our own (`ghcr.io/rmdevpro/m365-claude-relay`). From 2.0.0
-use Softeria's image; ours is no longer updated.
+Releases up to 1.4.4 shipped an image of our own (`ghcr.io/rmdevpro/m365-claude-relay`). 2.0.0
+used Softeria's image unmodified; from 2.1.0 the image is our build of Softeria's server described above.
 
 ## Support and contributing
 
