@@ -3,8 +3,10 @@
 **Microsoft 365 for Claude custom connectors — each user acts as themselves.**
 Give Claude (web, desktop; Free, Pro, Team, Enterprise) your users' own Outlook mail, calendar,
 contacts and OneDrive through one container you run. Sign-in is Microsoft's own (Entra
-On-Behalf-Of); nothing is stored on disk, and Claude gets exactly the tools your chosen Graph
-scopes cover.
+On-Behalf-Of); tokens and mail are held in memory and never written to disk, and Claude gets
+exactly the tools your chosen Graph scopes cover. The only files the container writes are its
+bounded logs (10 MB × 5 each): diagnostics with no mail content, and an audit log recording which
+user called which tool on which item and with what result (user names and item ids, so personal data).
 
 **The server is Softeria's.** The container is our build of
 [Softeria's ms-365-mcp-server](https://github.com/Softeria/ms-365-mcp-server) (MIT), version 0.176.0,
@@ -16,7 +18,7 @@ to Deleted Items, as Outlook does, with the old behaviour kept as `permanently-d
 [rmdevpro/ms-365-mcp-server](https://github.com/rmdevpro/ms-365-mcp-server). Once Softeria releases
 both, this repository goes back to Softeria's own image. This repository is its configuration for Claude, the deployment and verification
 guide, the Entra and Claude setup, and a Claude skill. Everything the relay once added is now part
-of Softeria, through our upstream PRs and reports (Softeria#693, #694, #695, #703, #708, #733, #736):
+of Softeria, through our upstream PRs and reports (Softeria#693, #694, #695, #697, #708, #733, #736):
 the token checks and tenant allowlist, attachment upload links, `read-mail-text` and more.
 
 Open source, MIT, best-effort support via GitHub issues.
