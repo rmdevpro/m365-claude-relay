@@ -82,8 +82,8 @@ move the image digest to a newer release (Softeria's own, once it includes #775 
 | `MS365_MCP_TRUST_PROXY_HOPS=1` | one HTTPS ingress in front, so rate limits see real client addresses |
 
 **Scopes decide the tool surface.** Every Softeria tool whose required scopes are covered by the
-list is exposed, apart from the replaced tools above. The default seven scopes give **138 tools**
-on a personal account and **139** on a work tenant, including Softeria's `read-mail-text` (up to 20
+list is exposed, apart from the replaced tools above. The default seven scopes give **139 tools**
+on a personal account and **140** on a work tenant, including Softeria's `read-mail-text` (up to 20
 messages as text with the bulk junk removed; essential for working through a large mailbox).
 Per-tool list and recommended Claude permissions: [docs/tools.md](docs/tools.md). Claude's per-tool
 settings (Always allow / Needs approval / Blocked) decide what each user may actually do.

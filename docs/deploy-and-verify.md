@@ -72,7 +72,7 @@ Run each in a new chat and keep the answers as the test record. Approve each too
 
 | # | Ask Claude to… | Pass when |
 |---|---|---|
-| 1 | Refresh the connector (connector ⋮ > Refresh tools list) | "Tools list refreshed"; the tool count matches the scopes (138 for the default seven scopes on a personal account, 139 on a work tenant) |
+| 1 | Refresh the connector (connector ⋮ > Refresh tools list) | "Tools list refreshed"; the tool count matches the scopes (139 for the default seven scopes on a personal account, 140 on a work tenant) |
 | 2 | "Use get-current-user" | It returns the tester's own name and address |
 | 3 | "Use read-mail-text on my inbox, top 5" | Five messages as clean text, without quoted reply history; long messages marked `truncated` |
 | 4 | "Use read-mail-text with these two message ids" (from a listing) | The same text as in step 3 |
