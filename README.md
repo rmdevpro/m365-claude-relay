@@ -103,7 +103,7 @@ settings (Always allow / Needs approval / Blocked) decide what each user may act
 
 - `relay.env.example`, `docker-compose.example.yml`: the configuration.
 - `docs/entra.md`, `docs/claude.md`, `docs/deploy-and-verify.md`, `docs/tools.md`.
-- `claude-skill/`: Claude skills. `microsoft-365` teaches Claude the connector: mail, calendar, contacts, OneDrive and the file-link workflow, with the ground rules. `email-management` is an optional inbox triage process: a one-time interview builds each user's rules into Claude's memory (`example-rules.md` shows the form), then triage applies them.
+- `claude-skill/`: Claude skills. `microsoft-365` teaches Claude the connector: mail, calendar, contacts, OneDrive and the file-link workflow, with the ground rules. `email-management` goes with it: an inbox triage process, where a one-time interview builds each user's rules into Claude's memory (`example-rules.md` shows the form), then triage applies them.
 - `test/smoke.sh` (outside checks against any running relay), `test/tools.py` (tool surface); CI runs both against the pinned image on every push and weekly.
 
 Releases up to 1.4.4 shipped an image of our own (`ghcr.io/rmdevpro/m365-claude-relay`). 2.0.0
