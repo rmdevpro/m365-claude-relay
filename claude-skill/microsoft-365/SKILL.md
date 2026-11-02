@@ -84,7 +84,7 @@ Attachments can only be added to unsent drafts, never to received or sent mail (
 
 ### When a link fails
 
-- **Network, proxy, "host not allowed" or connection errors from `curl`:** the connector's host isn't in the sandbox's allowed domains. Tell the user to add it under **Settings → Capabilities → Code execution → Additional allowed domains** (the host is the one in the link). Then retry with a **new** link.
+- **Network, proxy, "host not allowed" or connection errors from `curl`:** the connector's host isn't in the sandbox's allowed domains. Tell the user it must be added under **Capabilities → Code execution → Additional allowed domains** (the host is the one in the link): in Settings on an individual plan, in Organization settings by an owner on a Team or Enterprise plan. Then retry with a **new** link.
 - **404:** the link was used or expired. Request a new one.
 - **502 on a download:** the sign-in token expired before the fetch. Request a new link; if it repeats, ask the user to reconnect the connector.
 - **`"ok": false`:** report the error text. Don't loop.
@@ -133,4 +133,4 @@ Attachments can only be added to unsent drafts, never to received or sent mail (
 - `delete-mail-message` moves to Deleted Items, like Delete in Outlook. `permanently-delete-mail-message` skips Deleted Items, like Shift+Delete: the message goes to Recoverable Items, which Outlook doesn't show, and can be recovered only for a limited time. Use it only when the user asks for a permanent delete. If `permanently-delete-mail-message` is not available, don't infer the relay's version or what `delete-mail-message` does from its absence: for an ordinary delete whose behaviour you can't be sure of, use `move-mail-message` to `deleteditems`.
 - Report what you actually did, with subjects or ids. Don't claim a send or an attachment worked without the tool or `curl` response showing it.
 - On 429 or 5xx, retry once, then report.
-- A 401 or a request to sign in again means the connector's sign-in expired: ask the user to reconnect it (Settings → Connectors). A 403 means the consented scopes don't cover that action: tell the user.
+- A 401 or a request to sign in again means the connector's sign-in expired: ask the user to reconnect it (Customize → Connectors, then Connect on the connector). A 403 means the consented scopes don't cover that action: tell the user.
